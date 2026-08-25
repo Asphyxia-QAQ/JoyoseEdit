@@ -16,6 +16,7 @@ import {
   listRules,
   updateCloudConfigParams,
   updateRulesContent,
+  upsertRulesContent,
 } from '@/db/dbio';
 import {
   detectActiveBackend,
@@ -40,6 +41,27 @@ import {
 } from '@/history/store';
 import { diff, applyDelta, invertDelta } from '@/history/diff';
 import { refreshEnvelope } from '@/history/envelope';
+import {
+  pickBoosterParams,
+  latestEnvelopeVersion,
+  getBoosterSourcePref,
+  getCommonSourcePref,
+  getWriteTarget,
+  getStoredInstallTs,
+  storeInstallTs,
+  resetAllPrefs,
+} from '@/state/source';
+
+/** “空配置”：params 为 null / 非对象 / 无任何键（官方下发过但只有 {}）时，
+ *  一律视为“未下发”——不展示版本、不参与锁定、写入被跳过。 */
+function isEmptyCloudParams(p: unknown): boolean {
+  return (
+    !p ||
+    typeof p !== 'object' ||
+    Array.isArray(p) ||
+    (Object.keys(p as object).length === 0)
+  );
+}
 
 export interface SessionState {
   connected: boolean;
@@ -92,7 +114,19 @@ export async function initialize(): Promise<void> {
   }
   state.connected = true;
   await refreshStat();
-  if (state.stat?.smartp.exists) {
+  // 模块刚刷入/重装/升级（安装标记变化）→ 重置本地偏好（覆写逻辑回到默认 both），
+  // 避免 WebView localStorage 的旧数据跨安装残留。
+  try {
+    const ts = await bridge.moduleInstallTs();
+    if (ts && ts !== '0' && ts !== getStoredInstallTs()) {
+      resetAllPrefs();
+      storeInstallTs(ts);
+    }
+  } catch {
+    /* 探测失败按不重置处理 */
+  }
+  // 任一库有内容（SmartP 或 teg_config）都拉取；SmartP 缺失/空时用 teg 兜底。
+  if (state.stat?.smartp.exists || state.stat?.teg.exists) {
     await pullAll();
   }
 }
@@ -110,18 +144,22 @@ export async function pullAll(): Promise<void> {
   state.loading = true;
   try {
     const [smartpBytes, tegBytes] = await Promise.all([
-      bridge.pull('smartp'),
-      bridge.pull('teg'),
+      state.stat?.smartp?.exists
+        ? bridge.pull('smartp')
+        : Promise.resolve<Uint8Array | null>(null),
+      state.stat?.teg?.exists
+        ? bridge.pull('teg')
+        : Promise.resolve<Uint8Array | null>(null),
     ]);
 
-    // open + extract
-    const dbS = await openDb(smartpBytes);
-    const dbT = await openDb(tegBytes);
+    // open + extract（缺失的库为 null）
+    const dbS = smartpBytes ? await openDb(smartpBytes) : null;
+    const dbT = tegBytes ? await openDb(tegBytes) : null;
     try {
       readIntoState(dbS, dbT);
     } finally {
-      closeDb(dbS);
-      closeDb(dbT);
+      if (dbS) closeDb(dbS);
+      if (dbT) closeDb(dbT);
     }
 
     // set baseline fingerprint
@@ -144,28 +182,148 @@ export async function pullAll(): Promise<void> {
   }
 }
 
-function readIntoState(dbS: Database, dbT: Database) {
+function readIntoState(dbS: Database | null, dbT: Database | null) {
   const cc: Record<string, any> = {};
-  for (const row of listCloudConfig(dbS)) {
-    cc[row.config_name] = {
-      meta: row,
-      params: parseParams(row.params),
-    };
+  if (dbS) {
+    for (const row of listCloudConfig(dbS)) {
+      const params = parseParams(row.params);
+      // 空配置（{} 或其它空形态）≠ 未下发：保留行、标记 empty，
+      // 由 UI/锁定/写入按 empty 特殊处理（不显示版本、不锁定、不写盘）。
+      const empty = isEmptyCloudParams(params);
+      cc[row.config_name] = {
+        meta: { ...row, _real: true, empty },
+        params,
+      };
+    }
   }
   state.cloudConfig = cc;
 
   const byModule: Record<string, any[]> = {};
-  for (const row of listRules(dbT)) {
-    const mod = row.rule_module ?? 'unknown';
-    if (!byModule[mod]) byModule[mod] = [];
-    try {
-      byModule[mod].push({ meta: row, content: parseParams(row.rule_content) });
-    } catch {
-      // keep the raw row even if JSON is malformed
-      byModule[mod].push({ meta: row, content: row.rule_content });
+  if (dbT) {
+    for (const row of listRules(dbT)) {
+      const mod = row.rule_module ?? 'unknown';
+      if (!byModule[mod]) byModule[mod] = [];
+      try {
+        const content = parseParams(row.rule_content);
+        const envParams =
+          content && typeof content === 'object' && !Array.isArray(content)
+            ? (content as any).params
+            : null;
+        byModule[mod].push({
+          meta: { ...row, _real: true, empty: isEmptyCloudParams(envParams) },
+          content,
+        });
+      } catch {
+        // keep the raw row even if JSON is malformed
+        byModule[mod].push({ meta: { ...row, _real: true, empty: false }, content: row.rule_content });
+      }
     }
   }
   state.rulesByModule = byModule;
+
+  // ---- SmartP 缺失 / 无该配置行时，用 teg envelope 兜底构造工作副本 ----
+  // 让“只有 teg_config 有内容”的设备也能正常使用（不再依赖 SmartP 存在）。
+  for (const [name, rows] of Object.entries(byModule)) {
+    // 兜底条件：SmartP 没有该配置，或 SmartP 的该配置为空（empty）——此时若有
+    // 非空的 teg envelope，则采用 teg 内容（fromTeg），避免“SmartP 空配置挡住
+    // teg 的非空内容”导致识别不到 booster/common。
+    const cur = cc[name];
+    if (cur && !cur.meta?.empty) continue;
+    const env = rows.find((r) => {
+      const e = r.content;
+      return (
+        e &&
+        typeof e === 'object' &&
+        !Array.isArray(e) &&
+        !isEmptyCloudParams((e as any).params)
+      );
+    })?.content;
+    if (env) {
+      const p = parseParams(JSON.stringify((env as any).params));
+      cc[name] = {
+        // fromTeg：该配置在 SmartP 中不存在，内容完全来自 teg —— 调和时按 teg
+        // 处理，绝不能把它当作“SmartP 来源”展示版本号 / ← 当前。
+        meta: {
+          version: Number((env as any).version ?? 0),
+          rule_version: null,
+          fromTeg: true,
+          _real: true,
+        },
+        params: p,
+      };
+    }
+  }
+
+  // ---- 版本来源选择（source-of-truth）----
+  // booster_config 在 SmartP.db 与 teg_config.db 各有副本，官方更新时可能
+  // 不同步（teg 通常更新，且 rules 表保留多行历史）。按用户偏好选择；
+  // common_config 始终用 SmartP（其 teg 镜像字段不完整）。比较用
+  // envelope.version（与 SmartP.version 同 YYYYMMDDxx 体系），不能拿
+  // rule_version（内部序号）做跨库比较。指定“smartp / auto(t取新) / teg”。
+  {
+    const booster = cc['booster_config'];
+    if (booster) {
+      if (booster.meta.fromTeg) {
+        // SmartP 无该配置，内容完全来自 teg：来源只能是 teg
+        booster.meta.smartpVersion = 0;
+        booster.meta.tegVersion = latestEnvelopeVersion(byModule['booster_config']);
+        booster.meta.version =
+          booster.meta.tegVersion > 0 ? booster.meta.tegVersion : undefined;
+        booster.meta.source = 'teg';
+      } else {
+        // 保留两份库的原始版本供概览对比（调和会改写 meta.version）
+        booster.meta.smartpVersion = Number(booster.meta.version ?? 0);
+        booster.meta.tegVersion = latestEnvelopeVersion(byModule['booster_config']);
+        const picked = pickBoosterParams(
+          booster,
+          byModule['booster_config'],
+          getBoosterSourcePref(),
+        );
+        if (picked) {
+          booster.params = picked.params;
+          booster.meta.version = picked.version;
+          booster.meta.source = picked.source;
+        }
+      }
+    }
+  }
+
+  // common_config：内容(params)可按来源选择（默认 SmartP），但“版本号”以
+  // teg 为准——SmartP 的 common_config 官方本来就没有版本号，模块的
+  // COMMON_CONFIG_VERSION(2024010101) 只用于 teg 缺镜像行时的兜底写入，
+  // 不应被当作 SmartP 的真实版本显示/参与锁定。teg 无 common_config 时
+  // 显示为空（避免把 2024010101 误当成官方版本）。
+  {
+    const common = cc['common_config'];
+    if (common) {
+      common.meta.smartpVersion = Number(common.meta.version ?? 0);
+      common.meta.tegVersion = latestEnvelopeVersion(byModule['common_config']);
+    }
+    const pickedC = pickBoosterParams(
+      common,
+      byModule['common_config'],
+      getCommonSourcePref(),
+    );
+    if (common && pickedC) {
+      common.params = pickedC.params;
+      // 内容来源（smartp / teg）——用于 UI 标记“← 当前”
+      common.meta.source = pickedC.source;
+      common.meta.version =
+        common.meta.tegVersion > 0 ? common.meta.tegVersion : undefined;
+    }
+  }
+
+  // common_config 调和：SmartP 无该配置（teg 兜底）时直接以 teg 为准
+  {
+    const common2 = cc['common_config'];
+    if (common2 && common2.meta.fromTeg) {
+      common2.meta.smartpVersion = 0;
+      common2.meta.tegVersion = latestEnvelopeVersion(byModule['common_config']);
+      common2.meta.version =
+        common2.meta.tegVersion > 0 ? common2.meta.tegVersion : undefined;
+      common2.meta.source = 'teg';
+    }
+  }
 
   const booster = cc.booster_config?.params ?? {};
   state.paths = detectPaths(booster);
@@ -185,16 +343,50 @@ export function markDirty(): void {
 
 /** Synchronise teg_config.rules.rule_content for a given module from the
  * current cloud_config.params. Mirrors what Joyose itself does internally. */
+/** Fallback version used when teg_config has no common_config mirror row yet. */
+export const COMMON_CONFIG_VERSION = 2024010101;
+
+/** If teg carries any rules but is missing the common_config mirror, create a
+ *  placeholder row now so the push writes it. Version defaults per policy. */
+function ensureCommonConfigRules(): void {
+  const name = 'common_config';
+  const cc = state.cloudConfig[name];
+  // 仅在两库“真实存在且非空”的 common_config 时才补 teg 镜像；空壳/残留（_real!==true）
+  // 或空配置（empty）不建，杜绝“两库都无 common / 空 common 却被写入”。
+  if (cc?.meta?._real && !cc.meta?.empty && !state.rulesByModule[name]?.length) {
+    state.rulesByModule[name] = [
+      {
+        meta: { rule_version: COMMON_CONFIG_VERSION },
+        content: refreshEnvelope(null, cc.params, COMMON_CONFIG_VERSION, 'common_config'),
+      },
+    ];
+  }
+}
+
+function hasAnyRules(): boolean {
+  return Object.values(state.rulesByModule).some((rows) => rows.length > 0);
+}
+
 export function syncRuleContent(configName: string, newVersion?: number): void {
   const cc = state.cloudConfig[configName];
   if (!cc) return;
   const rules = state.rulesByModule[configName];
   if (!rules || rules.length === 0) return;
+  // 版本基准：只认“当前有效版本”（cc.meta.version，含锁定后的 2099 值）。
+  // common_config 在无有效版本时兜底 COMMON_CONFIG_VERSION(2024010101)。
+  // 绝不用 r.meta.rule_version（内部序号，且可能被旧版本污染成 2099 垃圾）。
+  const effV =
+    newVersion ?? resolveRuleVersion(configName, cc);
   for (const r of rules) {
-    const v = newVersion ?? Number(cc.meta.version ?? r.meta.rule_version ?? 0);
-    r.content = refreshEnvelope(r.content as any, cc.params, v);
+    r.content = refreshEnvelope(r.content as any, cc.params, effV > 0 ? effV : undefined, configName);
     if (typeof newVersion === 'number') r.meta.rule_version = newVersion;
   }
+}
+
+function resolveRuleVersion(configName: string, cc: any): number {
+  const cur = Number(cc.meta?.version ?? 0);
+  if (!(cur > 0)) return configName === 'common_config' ? COMMON_CONFIG_VERSION : 0;
+  return cur;
 }
 
 /** Lock the cloud version by rewriting the leading 4 digits to `2099`.
@@ -204,8 +396,24 @@ export function syncRuleContent(configName: string, newVersion?: number): void {
 export function lockCloudVersion(configName: string): number {
   const cc = state.cloudConfig[configName];
   if (!cc) throw new Error(`no config named ${configName}`);
+  if (cc.meta?.empty) {
+    throw new Error(`${configName}: 空配置，无可锁定的版本`);
+  }
   const current = Number(cc.meta.version ?? cc.params?.header?.version ?? 0);
-  const locked = rewriteYear(current);
+  // 锁定基准取“当前版本 与 teg 最新 envelope.version 的较大者”，这样 common_config
+  // 即使沿用 SmartP（旧版本）时，锁定也是基于 teg 里的新版本，保留其尾号。
+  const latestTeg = latestEnvelopeVersion(state.rulesByModule[configName]);
+  const base = Math.max(current, latestTeg);
+  if (!(base > 0)) {
+    throw new Error(
+      `${configName}: 未找到有效版本号（SmartP 与 teg 均无可用 version），无法锁定`,
+    );
+  }
+  const locked = rewriteYear(base);
+  // 记录锁定前真实版本，供“还原 version”恢复（而不是硬编码 2024 开头）。
+  if (cc.meta.originalVersion === undefined) {
+    cc.meta.originalVersion = current;
+  }
   cc.meta.version = locked;
   if (cc.params.header) cc.params.header.version = String(locked);
   syncRuleContent(configName, locked);
@@ -237,8 +445,7 @@ export interface PushOptions {
 
 /** Commit the in-memory edits: build history record, write both DBs, save
  * history, refresh state. Returns the history filename written. */
-export async function pushAll(opts: PushOptions = {}): Promise<string> {
-  state.loading = true;
+async function pushCore(opts: PushOptions = {}): Promise<string> {
   try {
     if (!opts.force) {
       const fresh = await bridge.stat();
@@ -260,7 +467,9 @@ export async function pushAll(opts: PushOptions = {}): Promise<string> {
 
     // Auto-sync rules.rule_content from the matching cloud_config row, so
     // any edit made via the structured views propagates to the teg mirror
-    // without the view layer needing to remember.
+    // without the view layer needing to remember. If teg has rules but is
+    // missing common_config, create it (version 2026010101 by default).
+    if (hasAnyRules()) ensureCommonConfigRules();
     for (const name of Object.keys(state.cloudConfig)) {
       if (state.rulesByModule[name]?.length) syncRuleContent(name);
     }
@@ -268,36 +477,67 @@ export async function pushAll(opts: PushOptions = {}): Promise<string> {
     // auto-backup
     await bridge.backup().catch(() => null);
 
-    // re-pull current bytes, mutate, write back
-    const [smartpBytes, tegBytes] = await Promise.all([bridge.pull('smartp'), bridge.pull('teg')]);
-    const dbS = await openDb(smartpBytes);
-    const dbT = await openDb(tegBytes);
+    // ---- 覆写逻辑：按 writeTarget 决定写哪份 DB（默认同时写） ----
+    const writeTarget = getWriteTarget();
+    const writeSmartp = writeTarget === 'both' || writeTarget === 'smartp';
+    const writeTeg = writeTarget === 'both' || writeTarget === 'teg';
 
-    let outSmartp: Uint8Array;
-    let outTeg: Uint8Array;
+    // re-pull current bytes, mutate, write back only the chosen target(s)
+    const pullTargets: Array<'smartp' | 'teg'> = [];
+    if (writeSmartp) pullTargets.push('smartp');
+    if (writeTeg) pullTargets.push('teg');
+    const [smartpBytes, tegBytes] = await Promise.all([
+      writeSmartp ? bridge.pull('smartp') : Promise.resolve(new Uint8Array(0)),
+      writeTeg ? bridge.pull('teg') : Promise.resolve(new Uint8Array(0)),
+    ]);
+    const dbS = writeSmartp ? await openDb(smartpBytes) : null;
+    const dbT = writeTeg ? await openDb(tegBytes) : null;
+
+    let outSmartp: Uint8Array | null = null;
+    let outTeg: Uint8Array | null = null;
     try {
-      for (const [name, obj] of Object.entries(state.cloudConfig)) {
-        const serialized = stringifyParams(obj.params);
-        const version =
-          typeof obj.meta.version === 'number' ? obj.meta.version : undefined;
-        updateCloudConfigParams(dbS, name, serialized, version);
+      if (dbS) {
+        for (const [name, obj] of Object.entries(state.cloudConfig)) {
+          // 仅写入两库真实存在且非空的配置；空壳/残留（_real 非真）与空配置（empty）不写盘
+          if (obj.meta?._real !== true || obj.meta?.empty) continue;
+          const serialized = stringifyParams(obj.params);
+          // common_config：SmartP.cloud_config 官方没有版本号，写回时不改
+          // version 列，避免把模块默认版本号写进 SmartP 造成误导。
+          const version =
+            name === 'common_config'
+              ? undefined
+              : typeof obj.meta.version === 'number'
+                ? obj.meta.version
+                : undefined;
+          updateCloudConfigParams(dbS, name, serialized, version);
+        }
       }
-      for (const [module, rows] of Object.entries(state.rulesByModule)) {
-        // When rules table is empty (redmi style), skip.
-        if (rows.length === 0) continue;
-        const latest = rows[0];
-        const envelope = latest.content;
-        const version =
-          typeof latest.meta.rule_version === 'number' ? latest.meta.rule_version : undefined;
-        updateRulesContent(dbT, module, JSON.stringify(envelope), version);
+      if (dbT) {
+        for (const [module, rows] of Object.entries(state.rulesByModule)) {
+          // When rules table is empty (redmi style), skip.
+          if (rows.length === 0) continue;
+          const latest = rows[0];
+          // 仅写两库真实存在且非空的 module；残留空壳（_real 非真）或空配置（empty）不写盘
+          if (latest.meta?._real !== true || latest.meta?.empty) continue;
+          const envelope = latest.content;
+          // 信封的 config_name / group_name 与 module 对齐（修正历史空串/坏值）
+          if (envelope && typeof envelope === 'object') {
+            (envelope as any).config_name = module;
+            if (!(envelope as any).group_name) (envelope as any).group_name = module;
+          }
+          // rule_version 列是 Joyose 内部序号，模块不干预（传 undefined 只更新
+          // content，不触碰 rule_version 列；新行插入时 version=null）。
+          upsertRulesContent(dbT, module, JSON.stringify(envelope), undefined);
+        }
       }
 
-      outSmartp = exportDb(dbS);
-      outTeg = exportDb(dbT);
+      if (dbS) outSmartp = exportDb(dbS);
+      if (dbT) outTeg = exportDb(dbT);
     } finally {
-      closeDb(dbS);
-      closeDb(dbT);
+      if (dbS) closeDb(dbS);
+      if (dbT) closeDb(dbT);
     }
+    void pullTargets;
 
     const recordBefore = state.pristineSnapshot ??
       snapshotFromMaps({ cloudConfig: state.cloudConfig, rulesByModule: state.rulesByModule });
@@ -306,10 +546,9 @@ export async function pushAll(opts: PushOptions = {}): Promise<string> {
       rulesByModule: state.rulesByModule,
     });
 
-    // persist DBs first, so if anything fails we can re-sync
-    await bridge.push('smartp', outSmartp);
-    // only touch teg if we actually have rows to write
-    if (Object.values(state.rulesByModule).some((rows) => rows.length > 0)) {
+    // persist only the chosen target(s), backed up above regardless
+    if (outSmartp) await bridge.push('smartp', outSmartp);
+    if (outTeg && Object.values(state.rulesByModule).some((rows) => rows.length > 0)) {
       await bridge.push('teg', outTeg);
     }
 
@@ -343,6 +582,82 @@ export async function pushAll(opts: PushOptions = {}): Promise<string> {
       state.baselineTeg = fingerprint(state.stat.teg.mtime ?? 0, state.stat.teg.size ?? 0);
     }
     return fname;
+  } finally {
+    /* state.loading 由外层 pushAll 统一管理 */
+  }
+}
+
+/**
+ * 提交遇磁盘指纹冲突（Joyose 后台更新过 SmartP/teg）时，把当前内存中未提交的
+ * 改动 rebase 到 Joyose 最新状态上：保留 meta（锁定版本等），把 params 改动
+ * 用 diff/applyDelta 叠加到最新基底，随后重推。让普通使用者无需手动 force。
+ */
+async function rebaseOntoLatest(): Promise<void> {
+  const baseSnap =
+    state.pristineSnapshot ??
+    snapshotFromMaps({ cloudConfig: state.cloudConfig, rulesByModule: state.rulesByModule });
+  const nowSnap = snapshotFromMaps({
+    cloudConfig: state.cloudConfig,
+    rulesByModule: state.rulesByModule,
+  });
+  const delta = diff(baseSnap, nowSnap);
+
+  // 保留内存中的 meta（用户可能已锁定版本 / 切了来源）
+  const metasBefore: Record<string, any> = {};
+  for (const [k, v] of Object.entries(state.cloudConfig)) {
+    metasBefore[k] = JSON.parse(JSON.stringify((v as any).meta ?? null));
+  }
+
+  const [smartpBytes, tegBytes] = await Promise.all([
+    bridge.pull('smartp'),
+    bridge.pull('teg'),
+  ]);
+  const dbS = await openDb(smartpBytes);
+  const dbT = await openDb(tegBytes);
+  try {
+    readIntoState(dbS, dbT);
+  } finally {
+    closeDb(dbS);
+    closeDb(dbT);
+  }
+
+  // 恢复用户 meta，再把 params 改动叠加到最新基底
+  for (const [k, m] of Object.entries(metasBefore)) {
+    if (state.cloudConfig[k] && m) (state.cloudConfig[k] as any).meta = m;
+  }
+  const newestSnap = snapshotFromMaps({
+    cloudConfig: state.cloudConfig,
+    rulesByModule: state.rulesByModule,
+  });
+  const merged = applyDelta(newestSnap, delta);
+  rehydrateFromSnapshot(merged);
+  state.pristineSnapshot = newestSnap;
+  state.dirty = true;
+}
+
+/** 公共提交入口：冲突自动 rebase 重试（最多 3 次），仍失败才把错误抛给上层。 */
+export async function pushAll(opts: PushOptions = {}): Promise<string> {
+  state.loading = true;
+  try {
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await pushCore(opts);
+      } catch (err) {
+        lastErr = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!opts.force && msg.includes('changed on disk since pull') && attempt < 2) {
+          try {
+            await rebaseOntoLatest();
+            continue;
+          } catch (rebaseErr) {
+            lastErr = rebaseErr;
+          }
+        }
+        throw lastErr;
+      }
+    }
+    throw lastErr;
   } finally {
     state.loading = false;
   }

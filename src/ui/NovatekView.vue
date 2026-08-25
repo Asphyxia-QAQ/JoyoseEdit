@@ -49,11 +49,23 @@
           <input v-model="currentParsed.pkg" @input="rewrite" />
         </div>
 
-        <div class="grid-3">
-          <NovatekSegmentCard label="Set A ── 独显方案 A" :segment="currentParsed.setA" @change="rewrite" />
-          <NovatekSegmentCard label="Set GPU ── GPU 备选" :segment="currentParsed.setGpu" @change="rewrite" />
-          <NovatekSegmentCard label="Set B ── 独显方案 B" :segment="currentParsed.setB" @change="rewrite" />
-        </div>
+        <template v-if="!isComplex">
+          <div class="grid-3">
+            <NovatekSegmentCard label="Set A ── 独显方案 A" :segment="currentParsed.setA" @change="rewrite" />
+            <NovatekSegmentCard label="Set GPU ── GPU 备选" :segment="currentParsed.setGpu" @change="rewrite" />
+            <NovatekSegmentCard label="Set B ── 独显方案 B" :segment="currentParsed.setB" @change="rewrite" />
+          </div>
+        </template>
+        <template v-else>
+          <div class="stack">
+            <NovatekSegmentCard
+              v-for="fb in flatBlocks"
+              :key="fb.key"
+              :label="fb.label"
+              :segment="fb.block"
+              @change="rewrite" />
+          </div>
+        </template>
 
         <div class="panel" style="margin: 0; background: var(--bg-elevated)">
           <div class="label">序列化结果</div>
@@ -90,8 +102,11 @@ import {
   setThermal,
   blankNovatek,
   type NovatekParams,
+  type NovatekSet,
+  type NovatekBlock,
 } from '@/parsers/novatek-string';
 import NovatekSegmentCard from './NovatekSegmentCard.vue';
+
 import PackageListEditor from './PackageListEditor.vue';
 import { toast } from '@/state/toast';
 import { dialog } from '@/state/dialog';
@@ -158,6 +173,45 @@ watch(
 const issues = computed(() => {
   if (!currentParsed.value) return [];
   return validateNovatek(currentParsed.value);
+});
+
+const isComplex = computed(() => !!currentParsed.value?.complex);
+
+interface FlatBlockItem {
+  key: string;
+  label: string;
+  block: NovatekBlock;
+}
+
+const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+function letterName(i: number): string {
+  return LETTERS[i % 26] ?? `#${i + 1}`;
+}
+
+/** Flatten every block (across setA / setGpu / setB) and name each one:
+ *  minFps==0 && targetFps==0 → "Set GPU ── GPU 备选", others numbered
+ *  Set A / B / C … in order. Each block is editable via NovatekSegmentCard. */
+const flatBlocks = computed<FlatBlockItem[]>(() => {
+  const p = currentParsed.value;
+  if (!p) return [];
+  const segs: [string, NovatekSet][] = [
+    ['setA', p.setA],
+    ['setGpu', p.setGpu],
+    ['setB', p.setB],
+  ];
+  const out: FlatBlockItem[] = [];
+  let order = 0;
+  for (const [skey, set] of segs) {
+    set.blocks.forEach((b, bi) => {
+      const isGpu = Number(b.minFps) === 0 && Number(b.targetFps) === 0;
+      const label = isGpu
+        ? 'Set GPU ── GPU 备选'
+        : `Set ${letterName(order)} ── 独显方案 ${letterName(order)}`;
+      if (!isGpu) order++;
+      out.push({ key: `${skey}-${bi}`, label, block: b });
+    });
+  }
+  return out;
 });
 
 const blackApp = computed<string[]>(() => {

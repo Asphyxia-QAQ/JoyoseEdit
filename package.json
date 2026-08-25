@@ -1,7 +1,7 @@
 {
   "name": "joyose-edit",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.3",
   "type": "module",
   "description": "KernelSU WebUI module for editing V3 Joyose cloud control (SmartP.db / teg_config.db)",
   "license": "MIT",

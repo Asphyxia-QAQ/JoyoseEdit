@@ -140,6 +140,32 @@ export function updateRulesContent(
   return Number(res[0]?.values?.[0]?.[0] ?? 0);
 }
 
+
+/** Update rule rows for `module`; if none match (e.g. common_config has no
+ *  mirror row yet), insert one. Returns rows affected. */
+export function upsertRulesContent(
+  db: Database,
+  module: string,
+  content: string,
+  version?: number,
+): number {
+  const affected = updateRulesContent(db, module, content, version);
+  if (affected > 0) return affected;
+  try {
+    db.run(
+      `INSERT INTO rules (rule_module, rule_content, rule_version) VALUES (:m, :c, :v)`,
+      {
+        ':m': module,
+        ':c': content,
+        ':v': typeof version === 'number' ? version : null,
+      },
+    );
+    return 1;
+  } catch {
+    return 0; // rules table absent (redmi style) — skip silently
+  }
+}
+
 export function countRulesForModule(db: Database, module: string): number {
   const res = db.exec(`SELECT COUNT(*) FROM rules WHERE rule_module = '${module.replace(/'/g, "''")}'`);
   return Number(res[0]?.values?.[0]?.[0] ?? 0);

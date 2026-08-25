@@ -30,6 +30,7 @@ import {
   validateNovatek,
   setThermal,
   blankNovatek,
+  describeComplexBlocks,
   decodeSlot,
   encodeSlotHex,
 } from '../src/parsers/novatek-string';
@@ -64,6 +65,10 @@ import {
   parsePkgFps,
   serializePkgFps,
 } from '../src/parsers/per-game';
+import { scanFpsLock, applyUnlockFps, isFpsLockKey } from '../src/parsers/fpslock';
+import { pickBoosterParams, getCommonSourcePref, getWriteTarget, latestEnvelopeVersion } from '../src/state/source';
+
+import { scanThermalUnlock, applyThermalUnlock, liftTempGroupsInString, findTempGroups } from '../src/parsers/thermal-unlock';
 import { detectActiveBackend, detectPaths, parseParams, stringifyParams } from '../src/db/schema';
 import {
   buildRecord,
@@ -121,6 +126,10 @@ async function main() {
   await runMifisrStringTest();
   await runActiveBackendEdgeCases();
   await runEnvelopeTest();
+  await runNovatekComplexTest();
+  await runFpsLockPrefixTest();
+  await runSourcePickTest();
+  await runThermalUnlockTest();
 
   const failed = results.filter((r) => !r.ok);
   console.log(
@@ -157,6 +166,80 @@ async function runSample(sample: SamplePaths, SQL: Awaited<ReturnType<typeof ini
 
   const booster = cloudConfigRows.booster_config.params as any;
   const gb = booster.game_booster ?? {};
+
+  // --- 去除锁帧 (fpslock) ---
+  await check(`${sample.label}: fpslock scan returns sane shape`, () => {
+    const scan = scanFpsLock(booster);
+    if (typeof scan.totalKeys !== 'number' || scan.totalKeys < 0) {
+      throw new Error('bad totalKeys');
+    }
+    if (!Array.isArray(scan.entries)) throw new Error('bad entries');
+    return `totalKeys=${scan.totalKeys}, entries=${scan.entries.length}`;
+  });
+
+  await check(`${sample.label}: fpslock removes only lock keys, cleanly + idempotent`, () => {
+    const copy = JSON.parse(JSON.stringify(booster));
+    const keysBefore = collectAllKeys(copy);
+    const result = applyUnlockFps(copy);
+    const keysAfter = collectAllKeys(copy);
+
+    const removed = keysBefore.filter((k) => !keysAfter.includes(k));
+    const unexpected = removed.filter(
+      (k) => !isFpsLockKey(k) && k !== 'cgame_enable' && k !== 'dynamic_fps_global',
+    );
+    if (unexpected.length) {
+      throw new Error(`removed non-lock keys: ${unexpected.join(',')}`);
+    }
+
+    const remaining = keysAfter.filter((k) => isFpsLockKey(k));
+    if (remaining.length) {
+      throw new Error(`lock keys remain: ${remaining.join(',')}`);
+    }
+
+    // second run must be a no-op
+    const result2 = applyUnlockFps(copy);
+    if (result2.changed) throw new Error('second apply reported a change');
+
+    JSON.stringify(copy); // must still be valid JSON
+    return `removed ${removed.length} key(s), entriesAffected=${result.entriesAffected}, cgameDisabled=${result.cgameDisabled}`;
+  });
+
+  // --- 去除插帧温度限制 (thermal-unlock) ---
+  await check(`${sample.label}: thermal scan returns sane shape`, () => {
+    const scan = scanThermalUnlock(booster);
+    if (typeof scan.fieldsAffected !== 'number' || scan.fieldsAffected < 0) {
+      throw new Error('bad fieldsAffected');
+    }
+    return `fields=${scan.fieldsAffected}`;
+  });
+
+  await check(`${sample.label}: thermal unlock lifts temps + keeps novatek round-trip`, () => {
+    const copy = JSON.parse(JSON.stringify(booster));
+    const result = applyThermalUnlock(copy);
+    const novatekAfter: string[] =
+      Array.isArray((copy as any).game_booster?.novatek_game_params)
+        ? (copy as any).game_booster.novatek_game_params
+        : [];
+    for (const str of novatekAfter) {
+      const parsed = parseNovatek(str);
+      const round = serializeNovatek(parsed);
+      if (round !== str) {
+        throw new Error('thermal lift broke round-trip: ' + str + ' <=> ' + round);
+      }
+      for (const set of [parsed.setA, parsed.setGpu, parsed.setB]) {
+        for (const t of [set.t1, set.t2, set.t3, set.t4]) {
+          if (!t) continue;
+          const n = Number(t.split('&')[0]);
+          if (!Number.isNaN(n) && n > 0 && n < 90) {
+            throw new Error('temperature still low ' + t + ' after unlock');
+          }
+        }
+      }
+    }
+    const result2 = applyThermalUnlock(copy);
+    if (result2.changed) throw new Error('second apply reported a change');
+    return `unlocked ${result.groupsTotal} groups across ${result.fieldsAffected} fields; novatek round-trip OK`;
+  });
 
   // Path detection
   const paths = detectPaths(booster);
@@ -1024,6 +1107,220 @@ async function runEnvelopeTest() {
     const fresh = refreshEnvelope(null, { a: 1 }, 100);
     if (fresh.version !== 100) throw new Error('version wrong');
     if ((fresh.params as any).a !== 1) throw new Error('params wrong');
+  });
+  await check('envelope: refreshEnvelope fills missing keys (6 keys, no undefined)', () => {
+    const fresh = refreshEnvelope({ version: 5, params: {} } as any, { a: 1 }, 2026080401);
+    for (const k of ['config_name', 'group_name', 'enable', 'version', 'with_model', 'params']) {
+      if (!(k in fresh)) throw new Error('missing key ' + k);
+    }
+    const json = JSON.stringify(fresh);
+    if (json.includes('undefined')) throw new Error('undefined leaked into JSON: ' + json);
+    return '6 keys preserved';
+  });
+  await check('envelope: refreshEnvelope default enable/with_model for bare envelope', () => {
+    const fresh = refreshEnvelope({ version: 5, params: {} } as any, { a: 1 }, 2026080401);
+    if (fresh.enable !== true || fresh.with_model !== false) throw new Error('defaults wrong');
+    return 'enable=true, with_model=false';
+  });
+  await check('envelope: fallbackName repairs empty config_name/group_name', () => {
+    const fresh = refreshEnvelope(
+      { config_name: '', group_name: '', enable: true, version: 1, with_model: false, params: {} } as any,
+      { a: 1 },
+      2024010101,
+      'common_config',
+    );
+    if (fresh.config_name !== 'common_config' || fresh.group_name !== 'common_config') {
+      throw new Error('not repaired: ' + JSON.stringify(fresh));
+    }
+    if (JSON.stringify(fresh).includes('""')) throw new Error('empty name leaked into JSON');
+    return 'config_name/group_name repaired to module';
+  });
+}
+
+function collectAllKeys(node: unknown, acc: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    for (const item of node) collectAllKeys(item, acc);
+    return acc;
+  }
+  if (node && typeof node === 'object') {
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      acc.push(k);
+      collectAllKeys(v, acc);
+    }
+  }
+  return acc;
+}
+
+const COMPLEX_NOVATEK = 'com.miHoYo.Yuanshen_49#144#48,144,1,0x2114,0,0,0,0,0,0,0,0,0,0,0,1,0x1#45#43#41.5#40&41#120#40,120,1,0x2114,0,0,0,0,0,0,0,0,0,0,0,1,0x1#46.7#45#43#41|49#144#48,144,1,0x2114,0,0,0,0,0,0,0,0,0,0,0,1,0x1#46.7#45#43#41_0#0#0,0,0,0,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#46.7#45#43#41_49#144#48,144,1,0x2114,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#45#43#41.5#40&41#120#40,120,1,0x2114,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#46.7#45#43#41|49#144#48,144,1,0x2114,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#46.7#45#43#41';
+
+async function runNovatekComplexTest() {
+  console.log('\n=== novatek complex multi-block ===');
+  await check('novatek: complex multi-block round-trips verbatim', () => {
+    const p = parseNovatek(COMPLEX_NOVATEK);
+    const out = serializeNovatek(p);
+    if (out !== COMPLEX_NOVATEK) throw new Error('round-trip mismatch');
+    if (p.setA.raw === undefined) throw new Error('expected setA.raw flag');
+    return 'pkg=' + p.pkg + ': verbatim';
+  });
+  await check('novatek: setThermal lifts complex temperatures', () => {
+    const p = parseNovatek(COMPLEX_NOVATEK);
+    setThermal(p, '95', '93', '93', '91');
+    const out = serializeNovatek(p);
+    if (!out.includes('#95#93#93#91&41#120')) {
+      throw new Error('temps not lifted / join lost: ' + out.slice(0, 140));
+    }
+    return 'temps lifted to 9x, block joins preserved';
+  });
+  await check('novatek: editing standard-set surface fields persists (blocks sync)', () => {
+    const p = parseNovatek(
+      'com.miHoYo.Nap_61#120#60,120,1,0x2314#95#93#93#91_0#0#0,0,0,0,1,0x44,1,0x222,0,0,0,0,0x52,1,0x2#95#93#93#91_61#120#60,120,1,0x2314,1,0x44,1,0x222,0,0,0,0,0x52,1,0x2#95#93#93#91',
+    );
+    p.setA.minFps = '73';
+    p.setA.t1 = '47';
+    p.setB.targetFps = '144';
+    const out = serializeNovatek(p);
+    if (!out.startsWith('com.miHoYo.Nap_73#120#')) throw new Error('minFps not applied: ' + out.slice(0, 40));
+    if (!out.includes('#47#93#93#91_')) throw new Error('t1 not applied');
+    if (!out.includes('_61#144#')) throw new Error('setB targetFps not applied');
+    if (serializeNovatek(parseNovatek(out)) !== out) throw new Error('round-trip broken after edit');
+    return 'standard short format editable';
+  });
+}
+
+async function runFpsLockPrefixTest() {
+  console.log('\n=== fpslock prefix matching ===');
+  await check('fpslock: prefix matcher covers official PID_* / dynamic_fps* variants', () => {
+    const match = ['PID_T', 'PID_M', 'PID_HQ2_T', 'PID_HQ2_M', 'PID_RE2_T', 'PID_RE3_M', 'PID_RE4_T', 'PID_RE5_T', 'dynamic_fps', 'dynamic_fps_M', 'dynamic_fps_T', 'dynamic_fps_RE2'];
+    for (const k of match) if (!isFpsLockKey(k)) throw new Error(k + ' should match');
+    const noMatch = ['cgame_enable', 'boost_policy', 'scene_ovrride', 'perflock', 'migt', 'start_scene', 'end_scene', 'badfps_thresh1', 'badfps_thresh2', 'PID'];
+    for (const k of noMatch) if (isFpsLockKey(k)) throw new Error(k + ' should NOT match');
+    return 'prefix matching OK';
+  });
+}
+
+async function runSourcePickTest() {
+  console.log('\n=== booster source pick ===');
+  const smart = { meta: { version: 2025090351 }, params: { src: 'smartp', v: 2025090351 } };
+  const tegRows = [
+    { meta: { rule_version: 483381 }, content: { version: 2025031801, params: { src: 'teg', v: 2025031801 } } },
+    { meta: { rule_version: 505464 }, content: { version: 2025041601, params: { src: 'teg', v: 2025041601 } } },
+    { meta: { rule_version: 649438 }, content: { version: 2025120301, params: { src: 'teg', v: 2025120301 } } },
+  ];
+  await check('source: auto picks the higher envelope.version (teg latest row wins)', () => {
+    const p = pickBoosterParams(smart, tegRows, 'auto');
+    if (!p || p.source !== 'teg') throw new Error('expected teg, got ' + (p && p.source));
+    if (p.version !== 2025120301) throw new Error('expected 2025120301, got ' + p.version);
+    return 'teg latest envelope.version selected';
+  });
+  await check('source: smartp pref always keeps smartp', () => {
+    const p = pickBoosterParams(smart, tegRows, 'smartp');
+    if (!p || p.source !== 'smartp' || p.version !== 2025090351) throw new Error('smartp pref failed');
+    return 'smartp forced';
+  });
+  await check('source: teg pref forces teg even when older', () => {
+    const older = [{ meta: { rule_version: 1 }, content: { version: 2023010101, params: { x: 1 } } }];
+    const p = pickBoosterParams(smart, older, 'teg');
+    if (!p || p.source !== 'teg' || p.version !== 2023010101) throw new Error('teg forced failed');
+    return 'teg forced (even when older)';
+  });
+  await check('source: auto picks smartp when smartp is newer', () => {
+    const p = pickBoosterParams({ meta: { version: 2026012351 }, params: { src: 'smartp' } }, tegRows, 'auto');
+    if (!p || p.source !== 'smartp') throw new Error('expected smartp, got ' + (p && p.source));
+    return 'smartp newer -> smartp';
+  });
+  await check('source: common_config defaults to smartp', () => {
+    if (getCommonSourcePref() !== 'smartp') throw new Error('common default should be smartp');
+    return 'common_config source defaults to smartp';
+  });
+  await check('write target: defaults to both', () => {
+    if (getWriteTarget() !== 'both') throw new Error('write target should default to both');
+    return 'write target defaults to both';
+  });
+  await check('source: teg rows without envelope.version never leak rule_version', () => {
+    const rows = [
+      { meta: { rule_version: 706918 }, content: { params: { x: 1 } } },
+      { meta: { rule_version: 467472 }, content: { params: { y: 2 } } },
+    ];
+    const v = latestEnvelopeVersion(rows);
+    if (v !== 0) throw new Error('rule_version leaked as version: ' + v);
+    return 'rule_version isolated (0)';
+  });
+  await check('source: pickBoosterParams falls back to smartp when teg has no valid version', () => {
+    const smart = { meta: { version: 2026042590 }, params: { src: 'smartp' } };
+    const rows = [{ meta: { rule_version: 706918 }, content: { params: { x: 1 } } }];
+    const p = pickBoosterParams(smart, rows, 'auto');
+    if (!p || p.source !== 'smartp') throw new Error('expected smartp fallback, got ' + (p && p.source));
+    return 'smartp fallback OK';
+  });
+  await check('source: envelope.version is the display value, not rule_version', () => {
+    // UI ruleVersions(): prefer envelope.version (YYYYMMDDxx), ignore rule_version
+    const rows = [
+      { meta: { rule_version: 706918 }, content: { version: 2025120301, params: { x: 1 } } },
+      { meta: { rule_version: 530460 }, content: { version: 2025050901, params: { y: 2 } } },
+    ];
+    const vs = rows
+      .map((r) => {
+        const envV = (r.content as any)?.version;
+        if (typeof envV === 'number' && envV > 0) return envV;
+        return r.meta?.rule_version;
+      })
+      .filter(Boolean);
+    const shown = vs.join(',');
+    if (shown !== '2025120301,2025050901') throw new Error('got ' + shown);
+    if (shown.includes('706918')) throw new Error('rule_version leaked into display');
+    return 'display shows envelope.version 2025120301/2025050901';
+  });
+}
+
+async function runThermalUnlockTest() {
+  console.log('\n=== thermal unlock regressions ===');
+  const STANDARD =
+    'com.tencent.mf.uam_49#144#48,144,1,0x2012,0,0,1,0x535#45#43#43#41_0#0#0,0,0,0,1,2,1,0x535,1,1,0,0,0x22#45#43#43#41_49#144#48,144,1,0x2012,1,2,1,0x535,1,1,0,0,0x22#45#43#43#41';
+  const WANT =
+    'com.tencent.mf.uam_49#144#48,144,1,0x2012,0,0,1,0x535#95#93#93#91_0#0#0,0,0,0,1,2,1,0x535,1,1,0,0,0x22#95#93#93#91_49#144#48,144,1,0x2012,1,2,1,0x535,1,1,0,0,0x22#95#93#93#91';
+  await check('thermal: standard novatek never touches next-set minFps (49→99 regression)', () => {
+    const { out } = liftTempGroupsInString(STANDARD);
+    if (out !== WANT) throw new Error('unexpected: ' + out.slice(0, 130));
+    return 'all 3 sets lifted, 49#144 preserved';
+  });
+  await check('thermal: FRC / MIFISR / setGpu delimiter groups lift, no fps drift', () => {
+    const frc = liftTempGroupsInString('com.x_45_90_30_60_47_46.5_43_41_0x0_1_1').out;
+    if (!frc.includes('_97_96.5_93_91')) throw new Error('frc miss: ' + frc);
+    const mif = liftTempGroupsInString('com.x_-1#-1#45,60#47#45#44#42').out;
+    if (!mif.includes('#97#95#94#92')) throw new Error('mifisr miss: ' + mif);
+    const gpu = liftTempGroupsInString('com.x_0#0#0,0,0,0,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#46.7#45#43#41').out;
+    if (!gpu.includes('#96.7#95#93#91')) throw new Error('gpu set lift miss: ' + gpu);
+    return 'delimiters handled';
+  });
+  await check('thermal: complex |49#144 boundary preserved', () => {
+    const src = 'com.x_49#144#48,144,1,0x2114,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#45#43#41.5#40&41#120#40,120,1,0x2114,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#46.7#45#43#41|49#144#48,144,1,0x2114,1,0x55,1,0x222,0,0,0,0,0x52,1,0x1#46.7#45#43#41';
+    const { out } = liftTempGroupsInString(src);
+    if (out.includes('|99#144')) throw new Error('|49 became 99: ...' + out.slice(out.indexOf('|')));
+    if (!out.includes('#95#93#91.5#') || !out.includes('#96.7#')) throw new Error('temps not lifted');
+    return '|49#144 preserved, temps lifted';
+  });
+  await check('thermal: idempotent (second run no-op)', () => {
+    const { out, count } = liftTempGroupsInString(WANT);
+    if (count !== 0 || out !== WANT) throw new Error('not idempotent');
+    return 'idempotent';
+  });
+  await check('novatek: complex flag + describeComplexBlocks summary', () => {
+    const p = parseNovatek(COMPLEX_NOVATEK);
+    if (p.complex !== true) throw new Error('complex flag not set');
+    const blocks = describeComplexBlocks(p.setA.raw as string);
+    if (blocks.length !== 3) throw new Error('expected 3 blocks, got ' + blocks.length);
+    if (blocks[0].minFps !== '49' || blocks[0].targetFps !== '144') throw new Error('block1 fps mis-parse');
+    if (blocks[1].minFps !== '41' || blocks[1].targetFps !== '120') throw new Error('block2 (&41#120) mis-parse');
+    if (blocks[2].minFps !== '49' || blocks[2].targetFps !== '144') throw new Error('block3 (|49#144) mis-parse');
+    if (!blocks[0].csv.includes('0x2114')) throw new Error('csv lost');
+    return 'complex flag + 3 blocks parsed (' + blocks.map((b) => b.minFps + '#' + b.targetFps).join(', ') + ')';
+  });
+  await check('thermal: &-suffixed minFps preserved (40&41 -> 90&41, 120 targetFps untouched)', () => {
+    const src = 'com.x_a#1#2#45#43#41.5#40&41#120#40,120,1,0x1#46.7#45#43#41';
+    const want = 'com.x_a#1#2#95#93#91.5#90&41#120#40,120,1,0x1#96.7#95#93#91';
+    const { out } = liftTempGroupsInString(src);
+    if (out !== want) throw new Error('got: ' + out);
+    return '& minFps preserved, temps lifted';
   });
 }
 

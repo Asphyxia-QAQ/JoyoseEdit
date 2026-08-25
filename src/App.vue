@@ -22,6 +22,14 @@
         <span class="badge" v-if="isLocked">已锁</span>
       </button>
 
+      <button class="nav-btn" :class="{ active: view === 'unlockfps' }" @click="view = 'unlockfps'">
+        <span>去除锁帧</span>
+      </button>
+
+      <button class="nav-btn" :class="{ active: view === 'thermal' }" @click="view = 'thermal'">
+        <span>温度解锁</span>
+      </button>
+
       <button class="nav-btn" :class="{ active: view === 'gamelist' }" @click="view = 'gamelist'">
         <span>游戏列表</span>
         <span class="badge" v-if="gameListCount">{{ gameListCount }}</span>
@@ -139,6 +147,8 @@ function asyncView(loader: () => Promise<unknown>) {
 }
 
 const LockView = asyncView(() => import('@/ui/LockView.vue'));
+const UnlockFpsView = asyncView(() => import('@/ui/UnlockFpsView.vue'));
+const ThermalUnlockView = asyncView(() => import('@/ui/ThermalUnlockView.vue'));
 const GameListView = asyncView(() => import('@/ui/GameListView.vue'));
 const FrcView = asyncView(() => import('@/ui/FrcView.vue'));
 const MifisrView = asyncView(() => import('@/ui/MifisrView.vue'));
@@ -151,6 +161,8 @@ const ImportExportView = asyncView(() => import('@/ui/ImportExportView.vue'));
 type ViewId =
   | 'overview'
   | 'lock'
+  | 'unlockfps'
+  | 'thermal'
   | 'gamelist'
   | 'frc'
   | 'mifisr'
@@ -167,6 +179,8 @@ const version = __APP_VERSION__;
 const VIEW_LABELS: Record<ViewId, string> = {
   overview: '概览',
   lock: '云控锁定',
+  unlockfps: '去除锁帧',
+  thermal: '温度解锁',
   gamelist: '游戏列表',
   frc: '高通 GPU',
   mifisr: 'MIFISR',
@@ -183,6 +197,8 @@ const currentView = computed(() => {
   switch (view.value) {
     case 'overview': return OverviewView;
     case 'lock': return LockView;
+    case 'unlockfps': return UnlockFpsView;
+    case 'thermal': return ThermalUnlockView;
     case 'gamelist': return GameListView;
     case 'frc': return FrcView;
     case 'mifisr': return MifisrView;

@@ -44,6 +44,8 @@
 | ------------ | ----------------------------------------------------------------------- |
 | 概览         | DB 状态 / 路径探测 / 快速备份                                           |
 | 云控锁定     | 冻结 teg SDK（推荐） + DB version 2099 锁（辅助）                       |
+| 去除锁帧     | 关闭 cgame_enable、删除 dynamic_fps_global 与所有 PID_* / dynamic_fps* 字段 |
+| 温度解锁     | 把所有插帧/超分温度阈值抬到 ~90°C（45#43#41 → 95#93#91）                 |
 | 游戏列表     | 编辑 `common_config.params.game_list` / `support_app`                   |
 | MIFISR       | 17 系列插帧 + 超分面板（`game_mifisr_config` + `fisr_config` 路由）     |
 | 高通 GPU     | `frc_game_params` 表单 + `fisr_config` 预设                             |
@@ -80,6 +82,8 @@ npm run dev
 module/                   KernelSU 模块载荷（customize / post-fs-data / bin）
   bin/joyose-edit.sh      所有特权操作的唯一入口；子命令白名单
 src/parsers/              各 per-game 字符串格式的 parse / serialize / validate
+src/parsers/fpslock.ts        去除锁帧：PID_* / dynamic_fps* 前缀匹配 + cgame/全局曲线清理
+src/parsers/thermal-unlock.ts 去除插帧温度限制：识别连续温度组并抬升至 ~90°C（安全，不碰帧率）
 src/db/                   sql.js 封装 + DB 路径探测 + 磁盘指纹
 src/history/              累积式历史 + diff + rule_content 信封同步
 src/root/bridge.ts        ksu.exec 封装 + shell 白名单类型化包装

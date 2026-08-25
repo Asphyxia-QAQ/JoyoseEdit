@@ -61,7 +61,18 @@ async function main() {
   const baseVersion = /^version=(.*)$/m.exec(rawProp)?.[1]?.trim() ?? 'v0';
 
   const git = readGitInfo(ROOT);
-  const versionCode = git.commits > 0 ? git.commits : 1;
+  // versionCode：优先采用 module.prop 里显式写入的值（如 260824 这类按日期/
+  // 语义定义的版本）；只有未显式设置（默认 1）时才回退到 git commit count。
+  const propCode = Number.parseInt(
+    /^versionCode=(.*)$/m.exec(rawProp)?.[1]?.trim() ?? '',
+    10,
+  );
+  const versionCode =
+    Number.isFinite(propCode) && propCode > 1
+      ? propCode
+      : git.commits > 0
+        ? git.commits
+        : 1;
 
   const updatedProp = rewriteModuleProp(rawProp, {
     versionCode,

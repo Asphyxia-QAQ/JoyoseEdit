@@ -104,6 +104,32 @@ export interface StatEntry {
   gid?: number;
 }
 
+/** 读取模块“安装标记”（customize.sh 在安装/升级时写入）。WebUI 用它判断
+ *  是否刚刷入/重装/升级，从而重置本地偏好。 */
+export async function moduleInstallTs(): Promise<string> {
+  try {
+    const out = await runKsu(`sh ${HELPER} install-ts`);
+    return out.trim();
+  } catch {
+    return '0';
+  }
+}
+
+/** 检测设备是否存在 /odm/etc/default_cloud.json（存在 → 默认覆写目标为仅 teg）。 */
+export async function fileExistsDefaultCloud(): Promise<boolean> {
+  try {
+    const out = await runKsu(`sh ${HELPER} test-file odm-etc-default-cloud`);
+    return out.trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/** 重置 Joyose 云控数据（清应用数据 → 唤醒云端服务重新获取）。 */
+export async function resetCloud(): Promise<void> {
+  await runKsu(`sh ${HELPER} reset-cloud`);
+}
+
 export async function stat(): Promise<StatResult> {
   const out = await runKsu(`sh ${HELPER} stat`);
   return JSON.parse(out);

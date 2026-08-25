@@ -40,7 +40,7 @@
       <div class="hint">导入会<strong>覆盖</strong>包内包含的配置域；未包含的域保持不变。</div>
 
       <div class="btn-row" style="margin-top: var(--space-3)">
-        <label class="ghost" style="cursor: pointer">
+        <label class="ghost" style="cursor: pointer; display: inline-flex; align-items: center; justify-content: center; line-height: 1; text-align: center">
           选择 JSON 文件
           <input type="file" accept=".json,application/json" style="display: none" @change="onFilePicked" />
         </label>

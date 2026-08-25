@@ -9,6 +9,21 @@ const pkg = JSON.parse(
   readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf-8'),
 ) as { version: string };
 
+// 版本以 module/module.prop 为单一事实来源（UI 徽标与模块版本保持一致）。
+function readAppVersion(): string {
+  try {
+    const prop = readFileSync(
+      fileURLToPath(new URL('./module/module.prop', import.meta.url)),
+      'utf-8',
+    );
+    const v = /^version=(.*)$/m.exec(prop)?.[1]?.trim() ?? "";
+    if (v) return v.replace(/^v/i, "");
+  } catch {
+    /* fall through to pkg.version */
+  }
+  return pkg.version;
+}
+
 function copySqlWasm(): Plugin {
   return {
     name: 'copy-sql-wasm',
@@ -25,7 +40,7 @@ function copySqlWasm(): Plugin {
 export default defineConfig({
   plugins: [vue(), copySqlWasm()],
   define: {
-    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_VERSION__: JSON.stringify(readAppVersion()),
   },
   resolve: {
     alias: {

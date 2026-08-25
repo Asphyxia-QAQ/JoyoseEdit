@@ -47,9 +47,17 @@
 </template>
 
 <script setup lang="ts">
-import type { NovatekSet } from '@/parsers/novatek-string';
+export interface SegmentShape {
+  minFps: string;
+  targetFps: string;
+  csv: string[];
+  t1: string;
+  t2: string;
+  t3: string;
+  t4: string;
+}
 
-const props = defineProps<{ label: string; segment: NovatekSet }>();
+const props = defineProps<{ label: string; segment: SegmentShape }>();
 const emit = defineEmits<{ (e: 'change'): void }>();
 
 function emitChange() {

@@ -34,16 +34,29 @@ export function refreshEnvelope<T>(
   envelope: RuleEnvelope<unknown> | null | undefined,
   params: T,
   version?: number,
+  /** 新建镜像行时使用的 config_name / group_name（envelope 为 null 或缺名时）。 */
+  fallbackName?: string,
 ): RuleEnvelope<T> {
   const base = envelope
     ? { ...envelope }
-    : buildRuleEnvelope('__unknown__', params, version ?? 0);
+    : buildRuleEnvelope(fallbackName ?? '__unknown__', params, version ?? 0);
+  // 补齐所有字段为确定值——官方 envelope 固定包含这 6 个键，缺字段会让
+  // JSON.stringify 丢掉 undefined 键，导致写入 teg 后只剩 version/params。
+  const groupName =
+    typeof base.group_name === 'string' && base.group_name !== ''
+      ? base.group_name
+      : typeof base.config_name === 'string' && base.config_name !== ''
+        ? base.config_name
+        : fallbackName ?? '';
   return {
-    config_name: base.config_name,
-    group_name: base.group_name,
-    enable: base.enable,
+    config_name:
+      typeof base.config_name === 'string' && base.config_name !== ''
+        ? base.config_name
+        : fallbackName ?? '',
+    group_name: groupName,
+    enable: typeof base.enable === 'boolean' ? base.enable : true,
     version: typeof version === 'number' ? version : base.version,
-    with_model: base.with_model,
+    with_model: typeof base.with_model === 'boolean' ? base.with_model : false,
     params,
   };
 }

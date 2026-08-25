@@ -347,11 +347,43 @@ cmd_history_save_from_stage() {
 
 # ---- dispatch -------------------------------------------------------------
 cmd="${1:-}"
+cmd_reset_cloud() {
+  # 重置 Joyose 云控：清空应用数据使其重新下载云控，再唤醒云端服务/接收器
+  pm clear com.xiaomi.joyose 2>/dev/null || true
+  am force-stop com.xiaomi.joyose 2>/dev/null || true
+  pm enable com.xiaomi.joyose/com.xiaomi.joyose.smartop.SmartOpService 2>/dev/null || true
+  pm enable com.xiaomi.joyose/com.xiaomi.joyose.cloud.CloudServerReceiver 2>/dev/null || true
+  am broadcast -a android.intent.action.BOOT_COMPLETED -p com.xiaomi.joyose 2>/dev/null || true
+  am broadcast com.xiaomi.joyose/com.xiaomi.joyose.cloud.CloudServerReceiver 2>/dev/null || true
+  am broadcast com.xiaomi.joyose/com.xiaomi.joyose.JoyoseBroadCastReceiver 2>/dev/null || true
+  am broadcast -a android.intent.action.BOOT_COMPLETED -n com.xiaomi.joyose/com.xiaomi.joyose.JoyoseBroadCastReceiver 2>/dev/null || true
+  printf 'ok'
+}
+
+cmd_install_ts() {
+  local f="/data/adb/modules/joyose-edit/.install_ts"
+  if [ -f "$f" ]; then cat "$f"; else printf '0'; fi
+}
+
+cmd_test_file() {
+  local key="$1"
+  case "$key" in
+    odm-etc-default-cloud)
+      if [ -f /odm/etc/default_cloud.json ]; then printf 'true'; else printf 'false'; fi
+      ;;
+    *)
+      die "unknown file probe: $key" ;;
+  esac
+}
+
 [ -n "$cmd" ] || die "missing subcommand"
 shift
 
 case "$cmd" in
   stat)           cmd_stat ;;
+  reset-cloud)    cmd_reset_cloud ;;
+  install-ts)     cmd_install_ts ;;
+  test-file)      cmd_test_file "${1:?}" ;;
   pull)           cmd_pull "${1:?}" ;;
   push)           cmd_push "${1:?}" "${2:?}" ;;
   backup)         cmd_backup "${1:-}" ;;
