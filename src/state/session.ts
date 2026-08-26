@@ -441,6 +441,9 @@ export interface PushOptions {
   source?: HistorySource;
   /** If true, ignore the baseline fingerprint mismatch and overwrite. */
   force?: boolean;
+  /** 强制写两份 DB（both），忽略全局覆写逻辑——JSON 编辑的提交用它，确保直接
+   *  修改底层配置时 SmartP 与 teg 始终同步。 */
+  forceBoth?: boolean;
 }
 
 /** Commit the in-memory edits: build history record, write both DBs, save
@@ -477,8 +480,9 @@ async function pushCore(opts: PushOptions = {}): Promise<string> {
     // auto-backup
     await bridge.backup().catch(() => null);
 
-    // ---- 覆写逻辑：按 writeTarget 决定写哪份 DB（默认同时写） ----
-    const writeTarget = getWriteTarget();
+    // ---- 覆写逻辑：按 writeTarget 决定写哪份 DB（默认同时写）。
+    // JSON 编辑（forceBoth）始终 both。
+    const writeTarget = opts.forceBoth ? 'both' : getWriteTarget();
     const writeSmartp = writeTarget === 'both' || writeTarget === 'smartp';
     const writeTeg = writeTarget === 'both' || writeTarget === 'teg';
 

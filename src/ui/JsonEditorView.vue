@@ -1,21 +1,26 @@
 <template>
   <div class="stack">
     <div class="panel">
-      <h2>JSON 编辑 <small>直接修改底层配置</small></h2>
-      <div class="row">
+      <div class="row" style="flex-wrap: wrap">
         <label class="row" style="gap: var(--space-1)">
           <span class="hint">目标</span>
           <select v-model="target">
-            <option v-for="name in cloudConfigNames" :key="name" :value="'cc:' + name">
-              cloud_config.{{ name }}.params
-            </option>
-            <option v-for="mod in rulesModules" :key="mod" :value="'rule:' + mod">
-              teg_config.rules[{{ mod }}].rule_content
-            </option>
+            <option value="sp_booster">SmartP_booster_config</option>
+            <option value="sp_common">SmartP_common_config</option>
+            <option value="teg_common">teg_config_common_config</option>
+            <option value="teg_booster">teg_config_booster_config</option>
           </select>
         </label>
         <button class="primary" @click="apply" :disabled="!editor || !isValidJson">应用到内存</button>
         <button class="ghost" @click="reset">重置为最新值</button>
+        <button class="ghost" @click="importText">导入 JSON</button>
+        <button class="ghost" @click="exportText" :disabled="!editor || !isValidJson">导出 JSON</button>
+      </div>
+      <div class="hint" style="margin-top: var(--space-2)">
+        四个目标对应各库的配置槽位：<code class="mono">SmartP_*</code> 编辑 SmartP
+        （cloud_config）侧，<code class="mono">teg_config_*</code> 编辑 teg（rules）侧。
+        JSON 编辑可直接选择任一目标，<strong>不受“覆写逻辑”限制</strong>；改动仍照常走顶部
+        “提交到设备”（写入方向由覆写逻辑决定，默认同时写）。
       </div>
     </div>
 
@@ -32,37 +37,36 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { state, markDirty } from '@/state/session';
 import { toast } from '@/state/toast';
 // CodeMirror is the biggest single contributor to bundle size and is only
 // used in this view — defer all imports until the view actually mounts.
 import type { EditorView } from 'codemirror';
 
-const target = ref<string>('');
+type Target = 'sp_booster' | 'sp_common' | 'teg_common' | 'teg_booster';
+
+const target = ref<Target>('sp_booster');
 const editorRoot = ref<HTMLElement | null>(null);
 const editor = ref<EditorView | null>(null);
 const isValidJson = ref(true);
 const parseError = ref('');
 const codeLength = ref(0);
 
-const cloudConfigNames = computed(() => Object.keys(state.cloudConfig));
-const rulesModules = computed(() => Object.keys(state.rulesByModule));
-
-watch(cloudConfigNames, (names) => {
-  if (!target.value && names.length > 0) target.value = 'cc:' + names[0];
-}, { immediate: true });
-
-watch(target, () => reset(), { immediate: true });
+const isEmptyObj = (p: unknown): boolean =>
+  !p || typeof p !== 'object' || Array.isArray(p) || Object.keys(p as object).length === 0;
 
 function currentText(): string {
-  if (!target.value) return '';
-  const [kind, name] = target.value.split(':');
-  if (kind === 'cc') {
-    return JSON.stringify(state.cloudConfig[name]?.params ?? {}, null, 2);
+  switch (target.value) {
+    case 'sp_booster':
+      return JSON.stringify(state.cloudConfig.booster_config?.params ?? {}, null, 2);
+    case 'sp_common':
+      return JSON.stringify(state.cloudConfig.common_config?.params ?? {}, null, 2);
+    case 'teg_common':
+      return JSON.stringify((state.rulesByModule.common_config ?? []).map((r) => r.content), null, 2);
+    case 'teg_booster':
+      return JSON.stringify((state.rulesByModule.booster_config ?? []).map((r) => r.content), null, 2);
   }
-  const rows = state.rulesByModule[name] ?? [];
-  return JSON.stringify(rows.map((r) => r.content), null, 2);
 }
 
 function reset() {
@@ -75,6 +79,8 @@ function reset() {
   parseError.value = '';
   codeLength.value = text.length;
 }
+
+watch(target, () => reset(), { immediate: true });
 
 async function mountEditor() {
   await nextTick();
@@ -124,26 +130,89 @@ onBeforeUnmount(() => {
 function apply() {
   if (!editor.value) return;
   const text = editor.value.state.doc.toString();
-  let parsed;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (err) {
     toast.fromError(err, 'JSON 解析失败');
     return;
   }
-  const [kind, name] = target.value.split(':');
-  if (kind === 'cc') {
-    if (!state.cloudConfig[name]) return;
-    state.cloudConfig[name].params = parsed;
-  } else {
-    const rows = state.rulesByModule[name] ?? [];
-    if (!Array.isArray(parsed) || parsed.length !== rows.length) {
-      toast.error(`格式错误`, `必须是包含 ${rows.length} 个 rule_content 的 JSON 数组`);
-      return;
+
+  switch (target.value) {
+    case 'sp_booster':
+    case 'sp_common': {
+      const name = target.value === 'sp_booster' ? 'booster_config' : 'common_config';
+      let cc = state.cloudConfig[name];
+      if (!cc) {
+        cc = { meta: { _real: true, version: undefined }, params: parsed };
+        state.cloudConfig[name] = cc;
+      } else {
+        cc.params = parsed;
+        // 原为空配置、现已填入内容 → 解除 empty，允许提交写入
+        if (cc.meta?.empty && !isEmptyObj(parsed)) cc.meta.empty = false;
+      }
+      break;
     }
-    for (let i = 0; i < rows.length; i++) rows[i].content = parsed[i];
+    case 'teg_booster':
+    case 'teg_common': {
+      const mod = target.value === 'teg_booster' ? 'booster_config' : 'common_config';
+      const rows = state.rulesByModule[mod] ?? [];
+      if (!Array.isArray(parsed)) {
+        toast.error('格式错误', 'teg 目标应为 rule_content 数组');
+        return;
+      }
+      if (rows.length === 0) {
+        // teg 侧尚无该 module 行 → 按用户提供的数组新建
+        state.rulesByModule[mod] = parsed.map((c: unknown) => ({
+          meta: { _real: true, empty: false },
+          content: c,
+        }));
+      } else {
+        if (parsed.length !== rows.length) {
+          toast.error('格式错误', `teg 现有 ${rows.length} 行，数组需 ${rows.length} 个元素`);
+          return;
+        }
+        for (let i = 0; i < rows.length; i++) rows[i].content = parsed[i];
+      }
+      break;
+    }
   }
   markDirty();
-  toast.success('已应用到内存', '使用顶部"提交到设备"按钮写入 DB');
+  toast.success('已应用到内存', '使用顶部“提交到设备”按钮写入 DB');
+}
+
+function exportText() {
+  const text = editor.value?.state.doc.toString() ?? '';
+  const blob = new Blob([text], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `joyose-edit-${target.value}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast.success('已导出', a.download);
+}
+
+function importText() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = () => {
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? '');
+      if (editor.value) {
+        editor.value.dispatch({
+          changes: { from: 0, to: editor.value.state.doc.length, insert: text },
+        });
+      }
+      toast.success('已导入', file.name);
+    };
+    reader.readAsText(file);
+  };
+  input.click();
 }
 </script>

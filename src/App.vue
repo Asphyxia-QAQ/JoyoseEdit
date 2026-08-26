@@ -267,7 +267,8 @@ async function handlePush() {
   });
   if (note === null) return;
   try {
-    const name = await pushAll({ note });
+    // JSON 编辑视图的提交强制同时写两份（不受覆写逻辑影响）
+    const name = await pushAll({ note, forceBoth: view.value === 'json' });
     toast.success('已提交并写入历史', name);
   } catch (err) {
     toast.fromError(err, '提交失败');

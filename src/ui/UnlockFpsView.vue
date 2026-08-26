@@ -3,7 +3,7 @@
     <div class="panel">
       <div class="panel-header">
         <h2>去除锁帧</h2>
-        <button class="danger" @click="doApply" :disabled="state.loading || !hasBooster">去除锁帧</button>
+        <button class="danger" @click="doApply" :disabled="state.loading || !hasBooster || !hasLockContent">去除锁帧</button>
         <button class="ghost" @click="rescan" :disabled="!canApply">重新扫描</button>
       </div>
       <div class="hint">
@@ -91,6 +91,11 @@ const hasBooster = computed(() => booster.value !== null);
 
 const scan = computed<FpsLockScan>(() =>
   booster.value !== null ? scanFpsLock(booster.value) : emptyScan(),
+);
+
+/** 是否检测到锁帧内容（cgame / dynamic_fps_global / PID* 等任一）。 */
+const hasLockContent = computed(
+  () => scan.value.totalKeys > 0 || scan.value.hasDynamicFpsGlobal,
 );
 
 function emptyScan(): FpsLockScan {
