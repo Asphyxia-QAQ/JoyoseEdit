@@ -106,6 +106,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import * as bridge from '@/root/bridge';
 import { state, markDirty } from '@/state/session';
 import { toast } from '@/state/toast';
 import { dialog } from '@/state/dialog';
@@ -270,19 +271,18 @@ function downloadName(pkg: ExportFile): string {
   return `joyose-${backend}-${ts}${slug ? '-' + slug : ''}.json`;
 }
 
-function doExport() {
+/** 模块统一导出：走固定目录 /sdcard/Download/joyose-edit/<文件名>（root 写入，
+ *  不依赖 WebView 下载行为），与 JSON 编辑页一致。 */
+async function doExport() {
   const pkg = buildExportPackage();
   const body = serializePackage(pkg);
-  const blob = new Blob([body], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = downloadName(pkg);
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  toast.success('已生成导出文件', downloadName(pkg));
+  const fname = downloadName(pkg);
+  try {
+    const res = await bridge.exportFile(fname, body);
+    toast.success('已导出', res.path);
+  } catch (err) {
+    toast.fromError(err, '导出失败');
+  }
 }
 
 async function copyExport() {

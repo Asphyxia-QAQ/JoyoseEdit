@@ -360,6 +360,21 @@ cmd_reset_cloud() {
   printf 'ok'
 }
 
+cmd_save_dl_from_stage() {
+  safe_name "$1" || die "invalid download name"
+  safe_name "$2" || die "invalid stage name"
+  local dir="/sdcard/Download/joyose-edit"
+  local f="$dir/$1"
+  local stage_file="$STAGE_DIR/$2"
+  [ -f "$stage_file" ] || die "stage file missing: $2"
+  mkdir -p "$dir" 2>/dev/null || die "cannot create $dir"
+  umask 022
+  base64 -d < "$stage_file" > "$f" 2>/dev/null || die "base64 decode failed"
+  chmod 644 "$f" 2>/dev/null || true
+  rm -f "$stage_file"
+  printf '{"ok":true,"path":"%s"}\n' "$f"
+}
+
 cmd_install_ts() {
   local f="/data/adb/modules/joyose-edit/.install_ts"
   if [ -f "$f" ]; then cat "$f"; else printf '0'; fi
@@ -381,6 +396,7 @@ shift
 
 case "$cmd" in
   stat)           cmd_stat ;;
+  save-dl-from-stage) cmd_save_dl_from_stage "${1:?}" "${2:?}" ;;
   reset-cloud)    cmd_reset_cloud ;;
   install-ts)     cmd_install_ts ;;
   test-file)      cmd_test_file "${1:?}" ;;

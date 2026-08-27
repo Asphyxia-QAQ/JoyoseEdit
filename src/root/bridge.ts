@@ -115,16 +115,6 @@ export async function moduleInstallTs(): Promise<string> {
   }
 }
 
-/** 检测设备是否存在 /odm/etc/default_cloud.json（存在 → 默认覆写目标为仅 teg）。 */
-export async function fileExistsDefaultCloud(): Promise<boolean> {
-  try {
-    const out = await runKsu(`sh ${HELPER} test-file odm-etc-default-cloud`);
-    return out.trim() === 'true';
-  } catch {
-    return false;
-  }
-}
-
 /** 重置 Joyose 云控数据（清应用数据 → 唤醒云端服务重新获取）。 */
 export async function resetCloud(): Promise<void> {
   await runKsu(`sh ${HELPER} reset-cloud`);
@@ -183,6 +173,19 @@ export async function historySave(name: string, body: string): Promise<{ ok: tru
   const stage = `hist-${Date.now().toString(36)}`;
   await stageUpload(stage, b64);
   return JSON.parse(await runKsu(`sh ${HELPER} history-save-from-stage ${safeName} ${stage}`));
+}
+
+/** 导出内容到固定目录 /sdcard/Download/joyose-edit/<name>，返回精确路径。
+ *  走模块白名单子命令，不依赖 WebView/浏览器下载行为。 */
+export async function exportFile(
+  name: string,
+  body: string,
+): Promise<{ ok: true; path: string }> {
+  const safeName = sanitizeLabel(name, true);
+  const b64 = utf8ToBase64(body);
+  const stage = `dl-${Date.now().toString(36)}`;
+  await stageUpload(stage, b64);
+  return JSON.parse(await runKsu(`sh ${HELPER} save-dl-from-stage ${safeName} ${stage}`));
 }
 
 /**

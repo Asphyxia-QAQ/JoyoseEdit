@@ -63,7 +63,7 @@
           <div class="row">
             <strong class="mono">{{ name }}</strong>
             <span class="pill" :class="isLocked(cfg.meta.version) ? 'warn' : ''">
-              当前: {{ currentLabel(cfg, name) }}
+              当前: {{ currentLabel(cfg) }}
             </span>
           </div>
           <div v-for="ln in sourceNoteLines(cfg, name)" :key="ln.k" class="hint mono" style="margin-top: var(--space-1)">
@@ -176,8 +176,7 @@ const noBoosterWithCommon = computed(
 );
 
 /** 两行展示 SmartP.db / teg_config.db 各自的版本，并标注当前沿用的是哪个来源。
- *  common_config 的 SmartP 侧官方没有版本号（2024010101 只是模块写 teg 的兜底值），
- *  因此该行显示为“—”，避免误导。 */
+ *  common_config 的 SmartP 侧显示官方版本号（如 2024010101）；参数头为空保持为空。 */
 interface SourceLine { k: string; v: string; mark: string }
 
 function sourceNoteLines(cfg: any, name: string): SourceLine[] {
@@ -187,25 +186,22 @@ function sourceNoteLines(cfg: any, name: string): SourceLine[] {
   const isReal = cfg.meta?._real === true && !cfg.meta?.empty;
   const empty = !!cfg.meta?.empty;
   const src = isReal ? (cfg.meta?.source as 'smartp' | 'teg' | undefined) : undefined;
-  const isCommon = name === 'common_config';
   return [
     {
       k: 'SmartP',
-      // 空配置 / common_config 的 SmartP 侧无版本号 → 不显示数字
-      v: empty || isCommon ? '' : sp ? String(sp) : '',
+      // 空配置不显示；common_config 的 SmartP 侧显示官方版本号（如 2024010101）
+      v: empty ? '' : sp ? String(sp) : '',
       mark: src === 'smartp' ? '← 当前' : '',
     },
     { k: 'teg', v: empty ? '' : tg ? String(tg) : '', mark: src === 'teg' ? '← 当前' : '' },
   ];
 }
 
-/** “当前:”列：common_config 用 SmartP 时显示来源名（SmartP 无版本号），
- *  否则显示当前有效版本号。 */
-function currentLabel(cfg: any, name: string): string {
+/** “当前:”列：显示当前有效版本号；common_config 默认来源 SmartP 时即官方版本
+ * （如 2024010101），参数头为空时仍显示官方版本列。 */
+function currentLabel(cfg: any): string {
   if (cfg.meta?.empty) return '（空）';
-  const src = cfg.meta?.source as 'smartp' | 'teg' | undefined;
   const v = Number(cfg.meta?.version ?? 0);
-  if (name === 'common_config' && src === 'smartp') return 'SmartP';
   return v > 0 ? String(v) : '—';
 }
 
