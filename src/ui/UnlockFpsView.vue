@@ -4,16 +4,16 @@
       <div class="panel-header">
         <h2>去除锁帧</h2>
         <button class="danger" @click="doApply" :disabled="state.loading || !hasBooster || !hasLockContent">去除锁帧</button>
+        <button class="warn" @click="doLift" :disabled="state.loading || !hasBooster || !hasLiftContent">抬高阈值</button>
         <button class="ghost" @click="rescan" :disabled="!canApply">重新扫描</button>
       </div>
       <div class="hint">
-        一键清除 Joyose 云控里的帧率锁：关闭
-        <code class="mono">cgame_enable</code>、删除
-        <code class="mono">dynamic_fps_global</code>，并移除各游戏条目中的
-        <code class="mono">dynamic_fps / PID 类</code>字段
-        （<code class="mono">dynamic_fps</code>、<code class="mono">PID_T</code>、
-        <code class="mono">PID_RE*</code> 等官方新增变体都会按前缀匹配清除），
-        让设备不再按温度 / 场景强制压低帧率。改动仅作用于云控参数，不触碰其它配置。
+        去除锁帧：一键清除 Joyose 云控里的帧率限制，关闭
+        <code class="mono">cgame_enable</code>、移除
+        <code class="mono">dynamic_fps_global</code> 与
+        <code class="mono">dynamic_fps</code> / <code class="mono">PID</code> 类字段。<br />
+        抬高阈值：将 <code class="mono">dynamic_fps*</code>，仅把其中的降帧温度
+        抬到 90 ℃+ 级别（46.5→96.5、48→98…），<code class="mono">PID_*</code> 仍会移除。
       </div>
 
       <div v-if="!hasBooster" class="banner warn">
@@ -28,7 +28,7 @@
               <td>
                 <span v-if="scan.cgameEnables === null" class="hint">字段不存在</span>
                 <span v-else class="pill" :class="scan.cgameEnables ? 'warn' : 'ok'">
-                  {{ scan.cgameEnables ? '开启（锁帧生效）' : '已关闭' }}
+                  {{ scan.cgameEnables ? '开启' : '已关闭' }}
                 </span>
               </td>
             </tr>
@@ -84,7 +84,12 @@
 import { computed } from 'vue';
 import { state, markDirty } from '@/state/session';
 import { toast } from '@/state/toast';
-import { scanFpsLock, applyUnlockFps, type FpsLockScan } from '@/parsers/fpslock';
+import {
+  scanFpsLock,
+  applyUnlockFps,
+  applyLiftThermalFps,
+  type FpsLockScan,
+} from '@/parsers/fpslock';
 
 const booster = computed(() => state.cloudConfig.booster_config?.params ?? null);
 const hasBooster = computed(() => booster.value !== null);
@@ -97,6 +102,16 @@ const scan = computed<FpsLockScan>(() =>
 const hasLockContent = computed(
   () => scan.value.totalKeys > 0 || scan.value.hasDynamicFpsGlobal,
 );
+
+/** 是否有可“提温”的内容：树中必须存在 dynamic_fps*（含 _M/_T/global）才会有抬温对象。
+ *  光有 PID_*（无 dynamic_fps）不属于本按钮职责（由“去除锁帧”处理），因此禁用。 */
+const hasLiftContent = computed(() => {
+  let dyn = 0;
+  for (const [k, n] of Object.entries(scan.value.countByKey)) {
+    if (k.startsWith('dynamic_fps')) dyn += n ?? 0;
+  }
+  return dyn > 0;
+});
 
 function emptyScan(): FpsLockScan {
   return {
@@ -115,6 +130,24 @@ const canApply = computed(
 function rescan() {
   // scan is computed off the reactive booster, nothing to cache — toast for feedback.
   toast.info('已重新扫描', `共 ${scan.value.totalKeys} 个锁帧字段`);
+}
+
+function doLift() {
+  if (!booster.value) return;
+  const result = applyLiftThermalFps(booster.value);
+  markDirty();
+  if (!result.changed) {
+    toast.info('无可提温 / 删除内容', 'dynamic_fps* 与 PID_* 均未发现');
+    return;
+  }
+  const parts: string[] = [];
+  if (result.liftedKeys.length) parts.push(`提温 ${result.liftedKeys.length} 个 dynamic_fps 字段`);
+  const keySummary = Object.entries(result.removedByKey)
+    .filter(([, n]) => (n ?? 0) > 0)
+    .map(([k, n]) => `${k}×${n}`)
+    .join(' ');
+  if (keySummary) parts.push(keySummary);
+  toast.success('已抬高阈值（待提交）', parts.join('；'));
 }
 
 function doApply() {

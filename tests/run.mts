@@ -65,7 +65,13 @@ import {
   parsePkgFps,
   serializePkgFps,
 } from '../src/parsers/per-game';
-import { scanFpsLock, applyUnlockFps, isFpsLockKey } from '../src/parsers/fpslock';
+import {
+  scanFpsLock,
+  applyUnlockFps,
+  applyLiftThermalFps,
+  liftDynamicFpsTemps,
+  isFpsLockKey,
+} from '../src/parsers/fpslock';
 import { pickBoosterParams, getCommonSourcePref, getWriteTarget, latestEnvelopeVersion } from '../src/state/source';
 
 import { scanThermalUnlock, applyThermalUnlock, liftTempGroupsInString, findTempGroups } from '../src/parsers/thermal-unlock';
@@ -128,6 +134,7 @@ async function main() {
   await runEnvelopeTest();
   await runNovatekComplexTest();
   await runFpsLockPrefixTest();
+  await runLiftThermalTest();
   await runSourcePickTest();
   await runThermalUnlockTest();
 
@@ -1184,6 +1191,64 @@ async function runNovatekComplexTest() {
     if (!out.includes('_61#144#')) throw new Error('setB targetFps not applied');
     if (serializeNovatek(parseNovatek(out)) !== out) throw new Error('round-trip broken after edit');
     return 'standard short format editable';
+  });
+}
+
+async function runLiftThermalTest() {
+  console.log('\n=== dynamic_fps 提高温度阈值 (liftDynamicFpsTemps) ===');
+  await check('lift: 用户示例 46.5/48 抬到 96.5/98', () => {
+    const out = liftDynamicFpsTemps('10:0,46.5:90,48:60');
+    if (out !== '10:0,96.5:90,98:60') throw new Error(out);
+    return out;
+  });
+  await check('lift: _M 示例 42.5/44 抬到 92.5/94', () => {
+    const out = liftDynamicFpsTemps('10:0,42.5:90,44:60');
+    if (out !== '10:0,92.5:90,94:60') throw new Error(out);
+    return out;
+  });
+  await check('lift: 已是 9x 幂等不变', () => {
+    if (liftDynamicFpsTemps('10:0,98:90,99:60') !== '10:0,98:90,99:60') throw new Error('not idempotent');
+    return 'idempotent';
+  });
+  await check('lift: 非 3x-5x 温度(10/12) 保留', () => {
+    if (liftDynamicFpsTemps('10:0') !== '10:0') throw new Error('10 changed');
+    if (liftDynamicFpsTemps('12:0') !== '12:0') throw new Error('12 changed');
+    return 'non-3x-5x preserved';
+  });
+  await check('lift: 无法解析的分段原样保留', () => {
+    if (liftDynamicFpsTemps('') !== '') throw new Error('empty changed');
+    if (liftDynamicFpsTemps('abc') !== 'abc') throw new Error('no-: changed');
+    return 'fallback preserved';
+  });
+  await check('applyLiftThermalFps: 删 PID_*、dynamic_fps* 抬温、cgame_enable 不动', () => {
+    const tree: any = {
+      game_booster: {
+        cgame_enable: true,
+        dynamic_fps_global: '10:0,46.5:90,48:60',
+        booster_config: {
+          ovrride_config: [
+            { game_name: 'a.b.c', dynamic_fps: '10:0,42.5:90,44:60', dynamic_fps_M: '10:0,40:90,41:60', PID_T: 1, PID_M: 2 },
+          ],
+        },
+        mifisr_settings: { untouched: true },
+      },
+    };
+    const r = applyLiftThermalFps(tree);
+    const gb = tree.game_booster;
+    if (!gb.booster_config.ovrride_config[0].dynamic_fps.startsWith('10:0,92.5:90,94:60')) throw new Error('dynamic_fps not lifted');
+    if (gb.booster_config.ovrride_config[0].dynamic_fps_M !== '10:0,90:90,91:60') throw new Error('dynamic_fps_M not lifted');
+    if (gb.dynamic_fps_global !== '10:0,96.5:90,98:60') throw new Error('global not lifted');
+    if ('PID_T' in gb.booster_config.ovrride_config[0] || 'PID_M' in gb.booster_config.ovrride_config[0]) throw new Error('PID not removed');
+    if (gb.cgame_enable !== true) throw new Error('cgame_enable should stay');
+    if (gb.mifisr_settings?.untouched !== true) throw new Error('unrelated key touched');
+    if (!r.changed || !r.liftedKeys.includes('dynamic_fps') || r.removedByKey['PID_T'] !== 1) throw new Error('result stats wrong');
+    return 'lift-only scope confirmed';
+  });
+  await check('applyLiftThermalFps: 无内容时 changed=false', () => {
+    if (applyLiftThermalFps({ game_booster: { cgame_enable: true, frc_game_params: [] } }).changed !== false) {
+      throw new Error('should be no-op');
+    }
+    return 'no-op';
   });
 }
 

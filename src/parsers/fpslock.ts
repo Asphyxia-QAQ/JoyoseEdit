@@ -176,3 +176,72 @@ export function applyUnlockFps(params: unknown): UnlockFpsResult {
     changed,
   };
 }
+// ---------------------------------------------------------------------------
+// "提高温度阈值"（保留 dynamic_fps 曲线，仅抬高温控降帧温度）模式：
+//
+//   dynamic_fps* 形如 "10:0,46.5:90,48:60"（temp:fps 逐对，逗号分隔）。
+//   把温度段的十位 3~5 → 9（46.5→96.5、48→98、42.5→92.5…），即把“降帧阈值”
+//   抬到 90 ℃+ 级别，帧率列保持不动；10:0 这类非 3x-5x 温度原样保留。
+//   PID_* 字段照旧删除；cgame_enable / dynamic_fps_global 不去动（本模式
+//   的目标是“晚降帧”，不是“完全禁用云控帧率治理”）。
+// ---------------------------------------------------------------------------
+
+/** 抬升单个 dynamic_fps* 字符串中的温度阈值（30–59 → 90–99），幂等。 */
+export function liftDynamicFpsTemps(s: string): string {
+  return s
+    .split(',')
+    .map((part) => {
+      const idx = part.indexOf(':');
+      if (idx < 0) return part;
+      const temp = part.slice(0, idx);
+      const rest = part.slice(idx); // ':fps'
+      const lifted = temp.replace(/[3-5](?=\d)/g, () => '9');
+      return lifted + rest;
+    })
+    .join(',');
+}
+
+export interface LiftThermalFpsResult {
+  /** 被删除的 PID_* 键统计。 */
+  removedByKey: Record<string, number>;
+  /** 被抬温的 dynamic_fps* 键名列表。 */
+  liftedKeys: string[];
+  changed: boolean;
+}
+
+/** 提高温度阈值：删 PID_*；dynamic_fps*（含 _M/_T/global 等）保留并抬温。 */
+export function applyLiftThermalFps(params: unknown): LiftThermalFpsResult {
+  const removedByKey: Record<string, number> = {};
+  const liftedKeys: string[] = [];
+
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    for (const k of Object.keys(obj)) {
+      if (k.startsWith('PID_')) {
+        delete obj[k];
+        removedByKey[k] = (removedByKey[k] ?? 0) + 1;
+      } else if (k.startsWith('dynamic_fps') && typeof obj[k] === 'string') {
+        const lifted = liftDynamicFpsTemps(obj[k]);
+        if (lifted !== obj[k]) {
+          obj[k] = lifted;
+          liftedKeys.push(k);
+        }
+      }
+    }
+    for (const v of Object.values(obj)) {
+      if (v && typeof v === 'object') walk(v);
+    }
+  };
+
+  walk(params);
+  return {
+    removedByKey,
+    liftedKeys,
+    changed: Object.keys(removedByKey).length > 0 || liftedKeys.length > 0,
+  };
+}
