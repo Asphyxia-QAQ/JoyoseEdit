@@ -10,10 +10,8 @@
     </div>
 
     <div v-if="!hasCommon" class="banner warn">
-      <strong>common_config 未下发（不可编辑）</strong>
-      <span class="hint">当前 SmartP 与 teg_config 都没有 common_config，游戏列表暂不可编辑。
-        请等待官方云控下发 common_config 后再配置；为确保数据完整，
-        <strong>模块在此情况下不会向 common_config 写入任何内容</strong>。</span>
+      <strong>SmartP 未检测到 common_config</strong>
+      <span class="hint">SmartP 中没有 common_config 时，此页面暂不可用。可在概览页查看云控状态，或等待官方下发后刷新。</span>
     </div>
     <div v-else class="grid-2">
       <PackageListEditor title="game_list" :packages="gameList" @update="(v: string[]) => update('game_list', v)" />
@@ -25,7 +23,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import { state, markDirty } from '@/state/session';
+import { state, markDirty, sourceUsable } from '@/state/session';
 import PackageListEditor from './PackageListEditor.vue';
 
 const gameList = computed<string[]>(() => {
@@ -35,11 +33,13 @@ const supportApp = computed<string[]>(() => {
   return state.cloudConfig.common_config?.params?.support_app ?? [];
 });
 
-const hasCommon = computed(() => !!state.cloudConfig.common_config);
+/** 数据源可用性：默认仅 SmartP；允许 teg 兜底时工作副本有 common_config 即可用。 */
+const hasCommon = computed(() => sourceUsable('common_config'));
 
 function update(key: 'game_list' | 'support_app', next: string[]) {
+  // 数据源不可用 → 不可编辑：绝不创建/写入
+  if (!sourceUsable('common_config')) return;
   const cc = state.cloudConfig.common_config;
-  // 两库都无 common_config → 不可编辑：绝不创建/写入，保持数据一致
   if (!cc) return;
   if (!cc.params) cc.params = {};
   cc.params[key] = next;

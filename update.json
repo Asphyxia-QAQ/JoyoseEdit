@@ -1,6 +1,6 @@
 {
-  "version": "v1.0.6",
-  "versionCode": 260828,
-  "zipUrl": "https://github.com/Asphyxia-QAQ/JoyoseEdit/releases/download/v1.0.6/joyose-edit-v1.0.6.zip",
-  "changelog": "v1.0.6 — 去除锁帧页新增“抬高阈值”按钮(dynamic_fps* 降压阈值抬到 90℃、PID_* 照删)；按钮/介绍文案精简统一；新增回归测试"
+  "version": "v1.0.7",
+  "versionCode": 260829,
+  "zipUrl": "https://github.com/Asphyxia-QAQ/JoyoseEdit/releases/download/v1.0.7/joyose-edit-v1.0.7.zip",
+  "changelog": "v1.0.7 — 数据源策略(仅 SmartP/允许 teg 兜底)、全模块 SmartP 检测与门控、概览参数头版本、历史/备份保留 10、去除锁帧页抬高阈值"
 }

@@ -143,6 +143,14 @@ cmd_backup() {
   [ -f "$SMARTP" ] && cp -f "$SMARTP" "$dir/SmartP.db"
   [ -f "$TEG" ] && cp -f "$TEG" "$dir/teg_config.db"
   printf '{"ok":true,"dir":"%s","name":"%s"}\n' "$dir" "$(basename "$dir")"
+
+  # Keep only the newest 10 backups (by mtime). Use a pipe (not process
+  # substitution) so this stays compatible with Android mksh/dash.
+  local keep=10 i=0
+  ls -dt "$DATA_ROOT/backup"/*/ 2>/dev/null | while read -r d; do
+    i=$((i+1))
+    if [ "$i" -gt "$keep" ]; then rm -rf "$d"; fi
+  done
 }
 
 _revert_from_dir() {

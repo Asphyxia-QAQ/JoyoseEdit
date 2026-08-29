@@ -101,7 +101,7 @@
         <button class="ghost" @click="handleDiscard" :disabled="state.loading">丢弃</button>
       </div>
 
-      <Suspense>
+      <Suspense v-if="!isBoosterView || smartpHasBooster">
         <template #default>
           <component :is="currentView" />
         </template>
@@ -109,6 +109,10 @@
           <div class="muted">加载中…</div>
         </template>
       </Suspense>
+      <div v-else-if="isBoosterView && !smartpHasBooster" class="banner warn">
+        <strong>SmartP 未检测到 booster_config</strong>
+        <span>SmartP 中没有 booster_config 时，插帧 / 锁帧 / 温度等 booster 相关页面暂不可用。可在概览页查看云控状态，或等待官方下发后刷新。</span>
+      </div>
     </main>
     <ToastStack />
     <DialogStack />
@@ -117,7 +121,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, onMounted, ref, watch } from 'vue';
-import { state, initialize, pullAll, pushAll } from '@/state/session';
+import { state, initialize, pullAll, pushAll, sourceUsable } from '@/state/session';
 import { toast } from '@/state/toast';
 import OverviewView from '@/ui/OverviewView.vue';
 import ToastStack from '@/ui/ToastStack.vue';
@@ -230,6 +234,18 @@ function onNavClick(event: Event) {
 onMounted(async () => {
   await initialize();
 });
+
+const smartpHasBooster = computed(() => sourceUsable('booster_config'));
+/** 所有依赖 booster_config 的编辑页（SmartP 无 booster 时统一不给用）。 */
+const BOOSTER_VIEWS: ReadonlySet<ViewId> = new Set([
+  'unlockfps',
+  'thermal',
+  'frc',
+  'mifisr',
+  'novatek',
+  'mivk',
+]);
+const isBoosterView = computed(() => BOOSTER_VIEWS.has(view.value));
 
 const pathsActive = computed(() => state.paths.filter((p) => p.active).length);
 const isLocked = computed(() => {

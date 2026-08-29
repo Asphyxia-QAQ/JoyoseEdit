@@ -83,6 +83,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { state, markDirty } from '@/state/session';
+import { getDataSourcePref } from '@/state/source';
 import { toast } from '@/state/toast';
 import {
   scanFpsLock,
@@ -91,11 +92,16 @@ import {
   type FpsLockScan,
 } from '@/parsers/fpslock';
 
-const booster = computed(() => state.cloudConfig.booster_config?.params ?? null);
-const hasBooster = computed(() => booster.value !== null);
+/** 数据源可用性检测：默认仅 SmartP（smartpRaw）；允许 teg 兜底时用工作副本（含 teg 来源）。
+ *  操作仍作用于工作副本。 */
+const boosterSource = computed(() => {
+  if (getDataSourcePref() === 'teg-fallback') return state.cloudConfig.booster_config?.params ?? null;
+  return state.smartpRaw.booster_config ?? null;
+});
+const hasBooster = computed(() => boosterSource.value !== null);
 
 const scan = computed<FpsLockScan>(() =>
-  booster.value !== null ? scanFpsLock(booster.value) : emptyScan(),
+  boosterSource.value !== null ? scanFpsLock(boosterSource.value) : emptyScan(),
 );
 
 /** 是否检测到锁帧内容（cgame / dynamic_fps_global / PID* 等任一）。 */
@@ -124,7 +130,7 @@ function emptyScan(): FpsLockScan {
 }
 
 const canApply = computed(
-  () => booster.value !== null && !state.loading,
+  () => boosterSource.value !== null && !state.loading,
 );
 
 function rescan() {
@@ -133,8 +139,8 @@ function rescan() {
 }
 
 function doLift() {
-  if (!booster.value) return;
-  const result = applyLiftThermalFps(booster.value);
+  if (!state.cloudConfig.booster_config) return;
+  const result = applyLiftThermalFps(state.cloudConfig.booster_config.params);
   markDirty();
   if (!result.changed) {
     toast.info('无可提温 / 删除内容', 'dynamic_fps* 与 PID_* 均未发现');
@@ -151,8 +157,8 @@ function doLift() {
 }
 
 function doApply() {
-  if (!booster.value) return;
-  const result = applyUnlockFps(booster.value);
+  if (!state.cloudConfig.booster_config) return;
+  const result = applyUnlockFps(state.cloudConfig.booster_config.params);
   markDirty();
   if (!result.changed) {
     toast.info('未发现可清除的锁帧内容', '当前云控已经很“干净”了');

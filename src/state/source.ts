@@ -140,10 +140,45 @@ export function resetAllPrefs(): void {
     localStorage.removeItem(KEY);
     localStorage.removeItem(COMMON_KEY);
     localStorage.removeItem(INSTALL_TS_KEY);
+    localStorage.removeItem(DATA_SOURCE_KEY);
   } catch {
     /* ignore */
   }
 }
+
+// ----- 数据源策略（SmartP 检测 vs teg 兜底）-----
+export type DataSourcePref = 'smartp' | 'teg-fallback';
+
+const DATA_SOURCE_KEY = 'joyose-edit.dataSource';
+
+/** 数据源策略：
+ *   - smartp       ：仅 SmartP（与原作者一致）。SmartP 无对应内容 → 页面不可用。
+ *   - teg-fallback ：允许 teg 兜底。SmartP 无内容（或损坏）时也可用 teg 的内容；
+ *                    且此后所有修改/锁定都只写到 teg_config.db，SmartP 完全不碰。 */
+export function getDataSourcePref(): DataSourcePref {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const v = localStorage.getItem(DATA_SOURCE_KEY);
+      if (v === 'smartp' || v === 'teg-fallback') return v;
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  return 'smartp';
+}
+export function setDataSourcePref(v: DataSourcePref): void {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(DATA_SOURCE_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+export const DATA_SOURCE_LABELS: Record<DataSourcePref, string> = {
+  smartp: '仅 SmartP（默认）',
+  'teg-fallback': '允许 teg 兜底',
+};
 
 export const WRITE_TARGET_LABELS: Record<WriteTarget, string> = {
   both: '同时写 SmartP.db + teg_config.db（默认）',

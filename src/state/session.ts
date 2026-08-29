@@ -44,6 +44,7 @@ import { refreshEnvelope } from '@/history/envelope';
 import {
   pickBoosterParams,
   latestEnvelopeVersion,
+  getDataSourcePref,
   getBoosterSourcePref,
   getCommonSourcePref,
   getWriteTarget,
@@ -549,6 +550,13 @@ export async function saveJsonTarget(
   return { ok: true, target };
 }
 
+/** 数据源可用性（页面门控用）：默认仅 SmartP；允许 teg 兜底模式时，
+ *  工作副本（cloudConfig，含 teg 兜底/强制 teg 来源）有对应配置即可用。 */
+export function sourceUsable(configName: string): boolean {
+  if (getDataSourcePref() === 'teg-fallback') return !!state.cloudConfig[configName];
+  return !!state.smartpRaw[configName];
+}
+
 export function lockCloudVersion(configName: string): number {
   const cc = state.cloudConfig[configName];
   if (!cc) throw new Error(`no config named ${configName}`);
@@ -727,6 +735,8 @@ async function pushCore(opts: PushOptions = {}): Promise<string> {
     });
     const fname = buildHistoryFilename(ts, seq);
     await bridge.historySave(fname, JSON.stringify(rec));
+    // 历史最多保留最新 10 条（用户要求，越小越好管理）
+    await bridge.historyClear(10).catch(() => null);
 
     // restart Joyose so it picks up the new values
     await bridge.restart().catch(() => null);
@@ -895,6 +905,8 @@ export async function recordBackupCheckpoint(backupName: string): Promise<void> 
     delta: [],
   });
   await bridge.historySave(buildHistoryFilename(ts, seq), JSON.stringify(rec));
+  // 备份检查点同样只保留最新 10 条历史
+  await bridge.historyClear(10).catch(() => null);
 }
 
 export function buildHistoryStore() {

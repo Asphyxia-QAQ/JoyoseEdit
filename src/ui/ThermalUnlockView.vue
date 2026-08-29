@@ -62,6 +62,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { state, markDirty } from '@/state/session';
+import { getDataSourcePref } from '@/state/source';
 import { toast } from '@/state/toast';
 import {
   scanThermalUnlock,
@@ -70,11 +71,16 @@ import {
   type ThermalScan,
 } from '@/parsers/thermal-unlock';
 
-const booster = computed(() => state.cloudConfig.booster_config?.params ?? null);
-const hasBooster = computed(() => booster.value !== null);
+/** 数据源可用性检测：默认仅 SmartP（smartpRaw）；允许 teg 兜底时用工作副本（含 teg 来源）。
+ *  操作仍作用于工作副本。 */
+const boosterSource = computed(() => {
+  if (getDataSourcePref() === 'teg-fallback') return state.cloudConfig.booster_config?.params ?? null;
+  return state.smartpRaw.booster_config ?? null;
+});
+const hasBooster = computed(() => boosterSource.value !== null);
 
 const scan = computed<ThermalScan>(() =>
-  booster.value !== null ? scanThermalUnlock(booster.value) : emptyScan(),
+  boosterSource.value !== null ? scanThermalUnlock(boosterSource.value) : emptyScan(),
 );
 
 function emptyScan(): ThermalScan {
@@ -93,7 +99,7 @@ const uniqueGroups = computed<string[]>(() => {
       for (const g of findTempGroups(node)) set.add(g.raw);
     }
   };
-  if (booster.value) walk(booster.value);
+  if (boosterSource.value) walk(boosterSource.value);
   return [...set].slice(0, 12);
 });
 
@@ -111,8 +117,8 @@ function rescan() {
 const applied = ref(false);
 
 function doApply() {
-  if (!booster.value) return;
-  const result = applyThermalUnlock(booster.value);
+  if (!state.cloudConfig.booster_config) return;
+  const result = applyThermalUnlock(state.cloudConfig.booster_config.params);
   markDirty();
   applied.value = true;
   if (!result.changed) {
