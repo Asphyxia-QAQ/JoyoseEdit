@@ -1,6 +1,6 @@
 {
-  "version": "v1.0.7",
-  "versionCode": 260829,
-  "zipUrl": "https://github.com/Asphyxia-QAQ/JoyoseEdit/releases/download/v1.0.7/joyose-edit-v1.0.7.zip",
-  "changelog": "v1.0.7 — 数据源策略(仅 SmartP/允许 teg 兜底)、全模块 SmartP 检测与门控、概览参数头版本、历史/备份保留 10、去除锁帧页抬高阈值"
+  "version": "v1.0.8",
+  "versionCode": 260830,
+  "zipUrl": "https://github.com/Asphyxia-QAQ/JoyoseEdit/releases/download/v1.0.8/joyose-edit-v1.0.8.zip",
+  "changelog": "v1.0.8 — 数据源策略仅在 SmartP 空/teg 有时生效(两库齐全自动按版本最高);功能页按工作副本(版本来源选择结果)检测与操作;备份/历史保留最新10份(含安装时裁剪)"
 }

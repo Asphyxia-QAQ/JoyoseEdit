@@ -550,11 +550,15 @@ export async function saveJsonTarget(
   return { ok: true, target };
 }
 
-/** 数据源可用性（页面门控用）：默认仅 SmartP；允许 teg 兜底模式时，
- *  工作副本（cloudConfig，含 teg 兜底/强制 teg 来源）有对应配置即可用。 */
+/** 数据源可用性（页面门控用）：
+ *   - SmartP 有对应内容 → 始终可用（内容为“版本来源选择后”的工作副本，auto 取版本最高者，
+ *     与数据源 radio 不冲突）；
+ *   - SmartP 空 → 仅当“允许 teg 兜底”且工作副本（来自 teg）有对应内容时才可用；
+ *   - 两库都无 → 不可用。 */
 export function sourceUsable(configName: string): boolean {
+  if (!!state.smartpRaw[configName]) return true;
   if (getDataSourcePref() === 'teg-fallback') return !!state.cloudConfig[configName];
-  return !!state.smartpRaw[configName];
+  return false;
 }
 
 export function lockCloudVersion(configName: string): number {

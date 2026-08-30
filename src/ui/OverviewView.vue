@@ -29,7 +29,7 @@
         <DbStatCard label="teg_config.db" :stat="state.stat?.teg" />
       </div>
 
-      <div class="stack" style="margin-top: var(--space-3); gap: var(--space-1)">
+      <div v-if="showDataSource" class="stack" style="margin-top: var(--space-3); gap: var(--space-1)">
         <span class="label">数据源</span>
         <div class="row" style="gap: var(--space-3); flex-wrap: wrap">
           <label class="row" style="gap: var(--space-1)">
@@ -46,8 +46,8 @@
         <div class="hint">
           {{
             dataSource === 'teg-fallback'
-              ? '允许 teg 兜底：SmartP 没有内容时，可用 teg_config.db 的内容进行编辑 / 云控锁定。'
-              : '仅 SmartP：SmartP 中没有对应内容时，相关编辑页暂不可用。'
+              ? 'SmartP.db 没有内容、但 teg_config.db 有内容时：允许用 teg 的内容进行编辑 / 云控锁定。'
+              : 'SmartP.db 没有内容：相关编辑页暂不可用（需要时可切换到“允许 teg 兜底”）。'
           }}
         </div>
       </div>
@@ -297,6 +297,14 @@ async function onCommonSourceChange() {
 
 const writeTarget = ref<WriteTarget>(getWriteTarget());
 const dataSource = ref<import('@/state/source').DataSourcePref>(getDataSourcePref());
+
+/** 数据源 radio 仅在“SmartP 无该配置、但 teg_config 有”时显示（此时才需要用户决策）；
+ *  两库都有 → 用版本来源选择（auto 取最高）；两库都无 → 无意义不显示。 */
+const showDataSource = computed(() => {
+  const b = !state.smartpRaw.booster_config && tegHas('booster_config');
+  const c = !state.smartpRaw.common_config && tegHas('common_config');
+  return b || c;
+});
 
 async function onDataSource(v: import('@/state/source').DataSourcePref) {
   if (dataSource.value === v) return;

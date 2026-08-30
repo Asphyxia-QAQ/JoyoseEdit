@@ -61,8 +61,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { state, markDirty } from '@/state/session';
-import { getDataSourcePref } from '@/state/source';
+import { state, markDirty, sourceUsable } from '@/state/session';
 import { toast } from '@/state/toast';
 import {
   scanThermalUnlock,
@@ -71,13 +70,10 @@ import {
   type ThermalScan,
 } from '@/parsers/thermal-unlock';
 
-/** 数据源可用性检测：默认仅 SmartP（smartpRaw）；允许 teg 兜底时用工作副本（含 teg 来源）。
- *  操作仍作用于工作副本。 */
-const boosterSource = computed(() => {
-  if (getDataSourcePref() === 'teg-fallback') return state.cloudConfig.booster_config?.params ?? null;
-  return state.smartpRaw.booster_config ?? null;
-});
-const hasBooster = computed(() => boosterSource.value !== null);
+/** 检测与操作统一用工作副本（版本来源选择后的内容：auto 取版本最高者 / teg 兜底）。
+ *  可用性由数据源策略决定。 */
+const boosterSource = computed(() => state.cloudConfig.booster_config?.params ?? null);
+const hasBooster = computed(() => sourceUsable('booster_config'));
 
 const scan = computed<ThermalScan>(() =>
   boosterSource.value !== null ? scanThermalUnlock(boosterSource.value) : emptyScan(),

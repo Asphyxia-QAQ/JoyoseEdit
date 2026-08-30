@@ -23,6 +23,9 @@ chmod 700 "$DATA_ROOT/history"
 # Ensure the root helper is executable.
 if [ -f "$MODDIR/bin/joyose-edit.sh" ]; then
   set_perm "$MODDIR/bin/joyose-edit.sh" 0 0 0700
+  # Trim backups to the newest 10 even on (re)install — covers historical
+  # initial-* / labelled leftovers that the WebUI can't touch while offline.
+  sh "$MODDIR/bin/joyose-edit.sh" prune-backups 10 2>/dev/null || true
 fi
 
 # 仅“全新安装/卸载后重装”写入新的安装标记 → WebUI 重置本地偏好（覆写逻辑默认

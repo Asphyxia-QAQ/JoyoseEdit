@@ -143,10 +143,14 @@ cmd_backup() {
   [ -f "$SMARTP" ] && cp -f "$SMARTP" "$dir/SmartP.db"
   [ -f "$TEG" ] && cp -f "$TEG" "$dir/teg_config.db"
   printf '{"ok":true,"dir":"%s","name":"%s"}\n' "$dir" "$(basename "$dir")"
+  prune_backups 10
+}
 
-  # Keep only the newest 10 backups (by mtime). Use a pipe (not process
-  # substitution) so this stays compatible with Android mksh/dash.
-  local keep=10 i=0
+# Keep only the newest N backup dirs (default 10). Covers ALL backup dirs
+# (incl. initial-* / labelled) so the count never creeps up. Run on every
+# backup and on (re)install. Pipe-based loop works on Android mksh/dash.
+prune_backups() {
+  local keep="${1:-10}" i=0
   ls -dt "$DATA_ROOT/backup"/*/ 2>/dev/null | while read -r d; do
     i=$((i+1))
     if [ "$i" -gt "$keep" ]; then rm -rf "$d"; fi
@@ -411,6 +415,7 @@ case "$cmd" in
   pull)           cmd_pull "${1:?}" ;;
   push)           cmd_push "${1:?}" "${2:?}" ;;
   backup)         cmd_backup "${1:-}" ;;
+  prune-backups)  prune_backups "${1:-10}" ;;
   revert)         cmd_revert "${1:?}" ;;
   revert-latest)  cmd_revert_latest ;;
   restart)        cmd_restart ;;
